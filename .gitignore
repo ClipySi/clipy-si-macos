@@ -1,0 +1,88 @@
+# ───────────────── Project-specific ─────────────────
+# 個人の開発用の計画書・メモ（非公開）。公開用の docs/ は追跡する。
+# Maintainer-only planning docs live outside this public repository.
+.docs/
+
+# オリジナル Clipy は参照専用のローカルクローン（独自の .git を持つ）。
+# 製品ソースではないため追跡しない。共有したい場合は git submodule 化を検討。
+repos/
+
+# Claude Code のローカル設定・スキルは公開リポジトリに含めない
+# （メンテナ用のエージェント設定・手順書は agent-files 側で管理）。
+.claude/
+
+# メンテナのローカル専用エージェントメモ（公開リポジトリには含めない）。
+AGENTS.local.md
+CLAUDE.local.md
+
+# 他エージェント / エディタのローカル設定（このリポジトリでは追跡しない）。
+# エージェント指示の正本は AGENTS.md（追跡）。CLAUDE.md は @AGENTS.md import + Claude 固有節。
+.vscode/
+.agents/
+
+# ───────────────── macOS ─────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+
+# ───────────────── Xcode ─────────────────
+## User-specific（共有スキームは xcshareddata 配下なので追跡される）
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+*.xccheckout
+
+## Build output
+# Root-anchored to the Xcode build dir at the project root, so an unanchored
+# `build/` can't accidentally swallow a nested `build/` directory elsewhere.
+/build/
+DerivedData/
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+## Playgrounds
+timeline.xctimeline
+playground.xcworkspace
+
+# ───────────────── Swift Package Manager ─────────────────
+.build/
+.swiftpm/
+# 注: Package.resolved はビルド再現性のため追跡する（ignore しない）
+
+# ───────────────── Signing / secrets（コミット厳禁） ─────────────────
+*.p12
+*.cer
+*.certSigningRequest
+*.mobileprovision
+*.provisionprofile
+*.pem
+.env
+secrets/
+
+# ───────────────── Ad-hoc root-level build leftovers ─────────────────
+# One-off Swift experiment binaries/objects compiled directly at the repo root
+# (NOT part of Clipy.xcodeproj). Every pattern is anchored to `/` so it only
+# matches the repo root; real sources live under Clipy/ ClipyTests/ core/ tools/,
+# never at the root, so these can't shadow legitimate code.
+/*.o
+/a.out
+/test_*
+/check_*
+/exact_*
+
+# ───────────────── Tooling ─────────────────
+fastlane/report.xml
+fastlane/Preview.html
+fastlane/screenshots/**/*.png
+fastlane/test_output

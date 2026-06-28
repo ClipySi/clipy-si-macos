@@ -1,0 +1,117 @@
+name: macos-app
+
+# CI for the macOS app. Two jobs:
+#   • redaction-grep — fast, build-free static gate (logging discipline + typed-diagnostics
+#     enum-only). Runs anywhere.
+#   • build-test    — SwiftLint + xcodebuild build/test on a macOS runner. The shared Rust core is
+#     consumed as a prebuilt ClipySiCoreFFI XCFramework that SwiftPM downloads from this repo's
+#     GitHub Release asset (core/ClipySiCore uses binaryTarget url:checksum) — no core source,
+#     submodule, or token is needed, so fork PRs build too.
+#
+# Note: build-test resolves the ClipySiCore release asset pinned in core/ClipySiCore/Package.swift,
+# so it requires that release to exist.
+#
+# The uploaded ClipySi.app is an UNSIGNED, ad-hoc Debug build — handy for PR testing, but
+# Gatekeeper will quarantine it on download (right-click → Open, or `xattr -dr com.apple.quarantine`).
+# Signed/notarized distribution is produced by Scripts/release-notarize.sh outside CI.
+on:
+  push:
+    paths:
+      - "Clipy/**"
+      - "ClipyTests/**"
+      - "Clipy.xcodeproj/**"
+      - "core/**"
+      - "Scripts/redaction-grep.sh"
+      - ".github/workflows/macos-app.yml"
+  pull_request:
+    paths:
+      - "Clipy/**"
+      - "ClipyTests/**"
+      - "Clipy.xcodeproj/**"
+      - "core/**"
+      - "Scripts/redaction-grep.sh"
+      - ".github/workflows/macos-app.yml"
+  workflow_dispatch:
+
+# Cancel an in-flight run when a newer commit lands on the same ref, so superseded macOS runs don't
+# keep burning (10×) minutes.
+concurrency:
+  group: macos-app-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  redaction-grep:
+    name: redaction · logging static gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Redaction & logging gate
+        run: ./Scripts/redaction-grep.sh
+
+  build-test:
+    name: lint · build · test (macOS)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Select the newest installed Xcode
+        run: |
+          latest="$(ls -d /Applications/Xcode*.app | sort -V | tail -1)"
+          echo "Using $latest"
+          sudo xcode-select -s "$latest/Contents/Developer"
+          xcodebuild -version
+
+      - name: Install SwiftLint (pinned)
+        # Pin to the version the repo lints against so a newer Homebrew SwiftLint can't fail the
+        # --strict gate with rules the project hasn't adopted. Keep in sync with .swiftlint.yml.
+        env:
+          SWIFTLINT_VERSION: 0.63.3
+        run: |
+          curl -fsSL -o /tmp/swiftlint.zip \
+            "https://github.com/realm/SwiftLint/releases/download/${SWIFTLINT_VERSION}/portable_swiftlint.zip"
+          unzip -o /tmp/swiftlint.zip -d /tmp/swiftlint
+          sudo install /tmp/swiftlint/swiftlint /usr/local/bin/swiftlint
+          swiftlint version
+
+      - name: SwiftLint
+        run: swiftlint lint --quiet --strict
+
+      - name: Build & test
+        # SwiftPM downloads the prebuilt ClipySiCoreFFI XCFramework (binaryTarget url:checksum in
+        # core/ClipySiCore/Package.swift) during package resolution. Locale is pinned to en/US
+        # because the catalog asserts exact English titles.
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project Clipy.xcodeproj \
+            -scheme Clipy \
+            -destination 'platform=macOS' \
+            -skipMacroValidation \
+            -testLanguage en -testRegion US \
+            CODE_SIGN_IDENTITY=- \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            test
+
+      - name: Package app (.app → zip)
+        run: |
+          set -o pipefail
+          # The test step above already built the Debug .app into the default DerivedData; resolve
+          # its products dir and zip with `ditto` (preserves the bundle's symlinks/permissions).
+          products="$(xcodebuild -project Clipy.xcodeproj -scheme Clipy -configuration Debug \
+            -destination 'platform=macOS' -showBuildSettings 2>/dev/null \
+            | awk -F' = ' '/ BUILT_PRODUCTS_DIR /{print $2; exit}')"
+          echo "products dir: $products"
+          ditto -c -k --sequesterRsrc --keepParent "$products/ClipySi.app" ClipySi.app.zip
+          ls -lh ClipySi.app.zip
+
+      - name: Upload app artifact (unsigned Debug build)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClipySi-debug-unsigned
+          path: ClipySi.app.zip
+          if-no-files-found: error
+          retention-days: 14

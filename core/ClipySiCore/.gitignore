@@ -1,0 +1,6 @@
+# The prebuilt core is distributed as a GitHub Release asset, never committed
+# (it is ~118 MB). Drop a locally built copy here for offline/local development;
+# Package.swift uses it automatically when present.
+ClipySiCoreFFI.xcframework/
+*.xcframework.zip
+.build/
