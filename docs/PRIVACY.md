@@ -2,7 +2,7 @@
 
 **English** · [日本語](PRIVACY.ja.md)
 
-_Last updated: 2026-06-27_
+_Last updated: 2026-06-28_
 
 ClipySi is a clipboard manager for macOS. A clipboard manager sees everything you
 copy — including passwords and tokens — so privacy is the first design constraint,
@@ -11,7 +11,8 @@ not an afterthought.
 ## Summary
 
 - **Everything stays on your Mac.** Your clipboard history and snippets are stored
-  locally and are never uploaded by ClipySi.
+  locally and are not uploaded by ClipySi. (Cross-device sync is planned as an
+  opt-in feature — see *Planned: optional cross-device sync* below.)
 - **No telemetry by default.** Diagnostics are **off** out of the box and are
   opt-in. Even when enabled, they are collected locally and never sent
   automatically.
@@ -101,6 +102,20 @@ manually) at any time in the About window.
 
 ClipySi includes **no** advertising SDKs, analytics SDKs, or third-party crash
 reporters. The only network activity is the update check described above.
+
+## Planned: optional cross-device sync
+
+ClipySi is macOS-only today and, as described above, does not send your clipboard
+data off your device. Cross-device sync is on the roadmap. If and when it ships, it
+will be:
+
+- **Opt-in, off by default** — nothing syncs unless you turn it on.
+- **End-to-end encrypted** — encrypted on your device before it leaves, with a key
+  derived from a passphrase that only you hold.
+- **To storage you choose** — a local folder or your own cloud storage; ClipySi
+  still has no server that receives your clipboard.
+
+This policy will be updated with the specifics **before** any sync feature ships.
 
 ## Data retention & deletion
 
