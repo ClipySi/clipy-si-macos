@@ -213,6 +213,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         })
         monitor.isEnabled = AppSettings().observeScreenshot
         screenshotMonitor = monitor
+        // The screenshot save folder can change at any time (⇧⌘5 → Options → Save to) and macOS
+        // posts nothing when it does. The frontmost app changing is the signal we do have, and it
+        // covers the flows that change the setting — the Screenshot app, System Settings, a shell.
+        // Re-reading is a preference lookup plus a stat, and re-scopes only on an actual move.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self, selector: #selector(screenshotLocationMayHaveChanged),
+            name: NSWorkspace.didActivateApplicationNotification, object: nil
+        )
+    }
+
+    @objc
+    private func screenshotLocationMayHaveChanged() {
+        screenshotMonitor?.refreshSearchPaths()
     }
 
     private func captureScreenshot(tiff: Data) {

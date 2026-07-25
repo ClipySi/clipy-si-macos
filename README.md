@@ -33,7 +33,7 @@ Automatic updates are supported through Sparkle 2.
 - Detects duplicates and moves a copied-again item back to the top.
 - Supports history count limits, automatic trimming, and on-disk blob garbage collection.
 - Includes excluded-app settings so copies from selected apps are not stored.
-- Can optionally import screenshots saved to the Desktop.
+- Can optionally import screenshots, following the folder macOS is set to save them to.
 
 ### Menu And Paste
 
