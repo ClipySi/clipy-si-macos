@@ -9,6 +9,8 @@
 //
 //  Do NOT "fix" these strings — e.g. "Histroy" and the lowercase "paste" are intentional. Any
 //  setting the rewrite newly introduces should use a fresh, correctly-spelled key instead.
+//  Exactly one original key has been deliberately dropped: `kCPYPrefReorderClipsAfterPasting`
+//  (see `historySortNewestFirst`), whose name described a behaviour it never had.
 //
 //  Non-scalar settings are owned by their own subsystems, not by this scalar layer:
 //   - storeTypes ("kCPYPrefStoreTypesKey") is a [String: Bool] dictionary read by capture;
@@ -24,7 +26,20 @@ enum DefaultsKeys {
     static let maxHistorySize = "kCPYPrefMaxHistorySizeKey"
     static let storeTypes = "kCPYPrefStoreTypesKey"
     static let inputPasteCommand = "kCPYPrefInputPasteCommandKey"
-    static let reorderClipsAfterPasting = "kCPYPrefReorderClipsAfterPasting"
+    /// Sort direction of the history list: true (default) = newest `createdAt` first, false =
+    /// oldest first (`MenuModel.history()`). Backs the "Date Created" / "Last Used" popup.
+    ///
+    /// The one deliberate break from the original key set: this replaces
+    /// `kCPYPrefReorderClipsAfterPasting`, whose name never matched what it does — neither the
+    /// original nor this app ever reordered anything through it. Renaming resets the stored choice
+    /// to the default (accepted while the install base is tiny; called out in the release notes).
+    /// The behaviour that name promised is the separate `moveClipToTopOnPaste` below.
+    static let historySortNewestFirst = "clipyHistorySortNewestFirst"
+    /// Move a clip back to the top of the history when it is pasted from the history panel
+    /// (default ON). Rewrite-only, correctly-spelled key — the behaviour the original key's *name*
+    /// suggests, which nothing actually implemented. Off ⇒ a paste leaves the history untouched
+    /// (the original's behaviour).
+    static let moveClipToTopOnPaste = "clipyMoveClipToTopOnPaste"
     static let overwriteSameHistory = "kCPYPrefOverwriteSameHistroy"   // sic: "Histroy"
     static let copySameHistory = "kCPYPrefCopySameHistroy"             // sic: "Histroy"
 
@@ -162,7 +177,10 @@ extension DefaultsKeys {
         [
             maxHistorySize: 30,
             inputPasteCommand: true,
-            reorderClipsAfterPasting: true,
+            historySortNewestFirst: true,
+            // Rewrite-only (no original equivalent): a pasted clip moves back to the top of the
+            // history, matching the "Last Used" sort the default profile already selects.
+            moveClipToTopOnPaste: true,
             overwriteSameHistory: true,
             copySameHistory: true,
             showStatusItem: 1,

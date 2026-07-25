@@ -63,6 +63,18 @@ import Testing
         #expect(settings.pasteAndDeleteHistory == false)
     }
 
+    @Test func pasteGettersReadRegisteredDefaults() {
+        let defaults = freshDefaults()
+        DefaultsKeys.registerDefaults(in: defaults)
+
+        #expect(AppSettings(defaults: defaults).inputPasteCommand)
+        // Rewrite-only, ON out of the box: a pasted clip returns to the top of the history.
+        #expect(AppSettings(defaults: defaults).moveClipToTopOnPaste)
+
+        defaults.set(false, forKey: DefaultsKeys.moveClipToTopOnPaste)
+        #expect(AppSettings(defaults: defaults).moveClipToTopOnPaste == false)
+    }
+
     @Test func storeTypesDefaultToEnabledAndRespectExplicitDisable() {
         let defaults = freshDefaults()
         DefaultsKeys.registerDefaults(in: defaults)

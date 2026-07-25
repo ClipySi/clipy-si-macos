@@ -65,8 +65,8 @@ import Testing
         })
     }
 
-    @Test func oldestFirstWhenReorderDisabled() throws {
-        let defaults = freshDefaults { $0.set(false, forKey: DefaultsKeys.reorderClipsAfterPasting) }
+    @Test func oldestFirstWhenSortedByDateCreated() throws {
+        let defaults = freshDefaults { $0.set(false, forKey: DefaultsKeys.historySortNewestFirst) }
         try run(defaults: defaults, seed: { repo in
             try repo.add(try sealedClip(title: "old", createdAt: Make.epoch))
             try repo.add(try sealedClip(title: "new", createdAt: Make.epoch.addingTimeInterval(60)))

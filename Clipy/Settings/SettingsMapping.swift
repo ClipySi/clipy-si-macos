@@ -59,17 +59,18 @@ enum SettingsMapping {
         return clampMaxHistorySize(nextMultipleOfTen)
     }
 
-    // MARK: - Sort history order popup ↔ reorder-after-pasting Bool
+    // MARK: - Sort history order popup ↔ newest-first Bool
     //
     // Popup index 0 = "Date Created", 1 = "Last Used". The stored value is the Bool
-    // `reorderClipsAfterPasting` (true ⇒ the pasted clip moves to the top ⇒ "Last Used"),
-    // reproducing the original's Bool-as-selectedIndex binding.
+    // `historySortNewestFirst` (true ⇒ newest `createdAt` first ⇒ "Last Used"), reproducing the
+    // original's Bool-as-selectedIndex binding. It is purely a *display order* — moving a pasted
+    // clip back to the top is the separate `moveClipToTopOnPaste` switch (DefaultsKeys/PasteService).
 
-    static func sortOrderIndex(reorderAfterPasting: Bool) -> Int {
-        reorderAfterPasting ? 1 : 0
+    static func sortOrderIndex(newestFirst: Bool) -> Int {
+        newestFirst ? 1 : 0
     }
 
-    static func reorderAfterPasting(fromIndex index: Int) -> Bool {
+    static func sortNewestFirst(fromIndex index: Int) -> Bool {
         index == 1
     }
 

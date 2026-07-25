@@ -39,10 +39,14 @@ struct AppSettings {
     // MARK: - Paste
 
     var inputPasteCommand: Bool { defaults.bool(forKey: DefaultsKeys.inputPasteCommand) }
-    var reorderClipsAfterPasting: Bool { defaults.bool(forKey: DefaultsKeys.reorderClipsAfterPasting) }
+    /// Whether a paste from the history moves that clip back to the top (default ON). Distinct from
+    /// `historySortNewestFirst`, which only picks the display order.
+    var moveClipToTopOnPaste: Bool { defaults.bool(forKey: DefaultsKeys.moveClipToTopOnPaste) }
 
     // MARK: - Menu
 
+    /// History sort direction: true (default) = newest first, false = oldest first.
+    var historySortNewestFirst: Bool { defaults.bool(forKey: DefaultsKeys.historySortNewestFirst) }
     var showStatusItem: Int { defaults.integer(forKey: DefaultsKeys.showStatusItem) }
     var maxMenuItemTitleLength: Int { defaults.integer(forKey: DefaultsKeys.maxMenuItemTitleLength) }
     var menuItemsTitleStartWithZero: Bool { defaults.bool(forKey: DefaultsKeys.menuItemsTitleStartWithZero) }

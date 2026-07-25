@@ -41,6 +41,7 @@ Automatic updates are supported through Sparkle 2.
 - Opens the history panel at the cursor position with a global hotkey.
 - Assigns `⌘0`-`⌘9` number-key shortcuts to the first history items.
 - Pastes into the frontmost app by injecting `⌘V` with `CGEvent`.
+- Moves a pasted item back to the top of the history by default, and this can be turned off in Settings.
 - Supports modifier actions for plain-text paste, delete from history, and paste then delete.
 
 ### Snippets
