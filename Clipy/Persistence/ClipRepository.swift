@@ -147,8 +147,16 @@ struct ClipRepository {
                 copySameHistory: Bool,
                 overwriteSameHistory: Bool) throws -> Clip.ID? {
         try database.write { db in
+            // Only a LIVE, syncable row counts as "identical clip already exists". A tombstoned
+            // row keeps its `contentHash` until the engine purges it (up to the 35d retention),
+            // so without the `deletedAt` filter re-copying deleted content would bump the
+            // tombstone's timestamps and return its id — the capture would be silently dropped
+            // and never reappear in the history. `syncEligible` excludes rows withdrawn from
+            // sync for the same reason: they must not absorb a fresh capture of that content.
             let existing = try Clip
                 .where { $0.contentHash.eq(clip.contentHash) }
+                .where { $0.deletedAt.is(nil) }
+                .where { $0.syncEligible }
                 .order { $0.createdAt.desc() }
                 .fetchOne(db)
 

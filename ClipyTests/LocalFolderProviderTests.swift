@@ -79,6 +79,59 @@ import Testing
         }
     }
 
+    /// iCloud Drive (and friends) evict a file's contents to `.<name>.icloud` and the real name
+    /// leaves the directory. Reporting that as an empty namespace would tell the engine the
+    /// records are gone from the vault — which is what drives rejoin's local delete and GC.
+    @Test func evictedPlaceholdersFailTheListingInsteadOfReadingAsEmpty() throws {
+        try withProvider { provider, vaultDir in
+            let records = vaultDir.appendingPathComponent("records", isDirectory: true)
+            try Data([0]).write(to: records
+                .appendingPathComponent(".01020304-0506-0708-090a-0b0c0d0e0f10.cclip.icloud"))
+
+            #expect(throws: LocalFolderProvider.ProviderError.self) {
+                _ = try provider.listRecordIDs()
+            }
+            // The other namespaces are enumerated independently.
+            #expect(try provider.listTombstoneIDs().isEmpty)
+
+            let tombs = vaultDir.appendingPathComponent("tombs", isDirectory: true)
+            try Data([0]).write(to: tombs
+                .appendingPathComponent(".aabbccdd-0506-0708-090a-0b0c0d0e0f10.cclip.icloud"))
+            #expect(throws: LocalFolderProvider.ProviderError.self) {
+                _ = try provider.listTombstoneIDs()
+            }
+        }
+    }
+
+    /// A genuinely empty namespace is NOT an error — that is how a new vault, and a vault whose
+    /// records were all deleted, legitimately look.
+    @Test func emptyNamespaceIsStillAnEmptyListing() throws {
+        try withProvider { provider, vaultDir in
+            try Data([0]).write(to: vaultDir
+                .appendingPathComponent("records", isDirectory: true)
+                .appendingPathComponent(".DS_Store"))
+            #expect(try provider.listRecordIDs().isEmpty)
+        }
+    }
+
+    @Test func probingDoesNotCreateTheVaultLayout() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ClipySiVaultProbe-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+        let probe = try LocalFolderProvider(rootFolder: root, createIfMissing: false)
+        #expect(try probe.readVaultManifest() == nil)
+        #expect(
+            !FileManager.default.fileExists(atPath: root.appendingPathComponent("ClipySiVault").path),
+            "a read-only probe must not write into the user's folder"
+        )
+
+        // The create flow still lays it out.
+        _ = try LocalFolderProvider(rootFolder: root, createIfMissing: true)
+        #expect(FileManager.default.fileExists(atPath: root.appendingPathComponent("ClipySiVault/records").path))
+    }
+
     @Test func vaultManifestIsCreateExclusive() throws {
         try withProvider { provider, _ in
             let initial = try provider.readVaultManifest()

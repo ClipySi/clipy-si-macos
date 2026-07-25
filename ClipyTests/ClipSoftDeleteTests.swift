@@ -107,6 +107,55 @@ import Testing
         }
     }
 
+    /// Re-copying content that was soft-deleted must produce a NEW clip. The tombstone keeps its
+    /// `contentHash` until the engine purges it (up to the 35d retention), so a dedupe lookup that
+    /// sees tombstones would hand the capture back the tombstone's id — and the capture would
+    /// vanish: every user-facing read filters `deletedAt IS NULL`.
+    @Test func recopyingSoftDeletedContentInsertsANewLiveClip() throws {
+        try run { repo, _ in
+            let original = Make.clip(title: "phoenix", contentHash: "same")
+            try repo.add(original)
+            _ = try repo.delete(id: original.id, soft: true)
+            #expect(try repo.count() == 0)
+
+            let recopied = Make.clip(title: "phoenix", contentHash: "same")
+            let storedID = try repo.ingest(recopied, copySameHistory: true, overwriteSameHistory: true)
+
+            #expect(storedID == recopied.id, "a new row, not the tombstone's id")
+            #expect(try repo.count() == 1, "the re-copy is visible in the history")
+            #expect(try repo.clip(id: recopied.id)?.testTitle == "phoenix")
+            #expect(try repo.tombstones().map(\.id) == [original.id], "tombstone untouched")
+        }
+    }
+
+    /// Same hole on the drop path: with `copySameHistory` off, a tombstone match returned nil and
+    /// the capture was thrown away.
+    @Test func recopyingSoftDeletedContentIsNotDroppedAsADuplicate() throws {
+        try run { repo, _ in
+            let original = Make.clip(contentHash: "same")
+            try repo.add(original)
+            _ = try repo.delete(id: original.id, soft: true)
+
+            let recopied = Make.clip(contentHash: "same")
+            #expect(try repo.ingest(recopied, copySameHistory: false, overwriteSameHistory: true) == recopied.id)
+            #expect(try repo.count() == 1)
+        }
+    }
+
+    /// The dedupe behaviour against LIVE rows is unchanged.
+    @Test func recopyingLiveContentStillMovesTheExistingRowToTheTop() throws {
+        try run { repo, _ in
+            let first = Make.clip(contentHash: "same", createdAt: Make.epoch)
+            try repo.add(first)
+            var again = Make.clip(contentHash: "same")
+            again.createdAt = Make.epoch.addingTimeInterval(60)
+
+            #expect(try repo.ingest(again, copySameHistory: true, overwriteSameHistory: true) == first.id)
+            #expect(try repo.count() == 1, "still exactly one row")
+            #expect(try repo.clip(id: first.id)?.createdAt == Make.epoch.addingTimeInterval(60))
+        }
+    }
+
     @Test func applyRemoteInsertAndTombstoneAdvanceAppliedSetAtomically() throws {
         try run { repo, store in
             @Dependency(\.defaultDatabase) var database

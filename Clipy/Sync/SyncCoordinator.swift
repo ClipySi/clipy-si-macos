@@ -64,7 +64,10 @@ final class SyncCoordinator {
             teardown(.needsFolder)
             return
         }
-        guard let provider = try? LocalFolderProvider(rootFolder: URL(fileURLWithPath: path)) else {
+        // Probing must not write: creating `ClipySiVault/` here would drop a vault skeleton into
+        // whatever folder happens to be configured, and would mask a vault that has gone missing
+        // (unmounted volume, folder moved) as a folder that simply has no vault yet.
+        guard let provider = try? LocalFolderProvider(rootFolder: URL(fileURLWithPath: path), createIfMissing: false) else {
             teardown(.failed)
             return
         }
@@ -89,7 +92,7 @@ final class SyncCoordinator {
     /// Create a brand-new vault in the configured folder (or join a concurrently created one) and
     /// unlock with `passphrase`.
     func createVault(passphrase: String) throws {
-        let provider = try currentProvider()
+        let provider = try currentProvider(createIfMissing: true)
         let salt = try CryptoRandom.bytes(16)
         let descriptor = KdfDescriptorFfi(
             kind: .pbkdf2HmacSha256(iterations: Self.kdfIterations), salt: salt, kdfVersion: 1
@@ -153,11 +156,13 @@ final class SyncCoordinator {
 
     // MARK: - Private
 
-    private func currentProvider() throws -> LocalFolderProvider {
+    /// `createIfMissing` is true only for the create-vault flow — the one action whose whole
+    /// purpose is to write the layout.
+    private func currentProvider(createIfMissing: Bool = false) throws -> LocalFolderProvider {
         guard let path = AppSettings().syncFolderPath else {
             throw LocalFolderProvider.ProviderError.notFound("folder")
         }
-        return try LocalFolderProvider(rootFolder: URL(fileURLWithPath: path))
+        return try LocalFolderProvider(rootFolder: URL(fileURLWithPath: path), createIfMissing: createIfMissing)
     }
 
     private func finishUnlock(keyBytes: Data, provider: LocalFolderProvider) throws {

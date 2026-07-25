@@ -25,13 +25,22 @@ struct LocalFolderProvider: SyncProvider {
     enum ProviderError: Error {
         case notFound(String)
         case invalidID(String)
+        /// The namespace could not be enumerated completely, so its listing must NOT be read as
+        /// "these are all the records that exist" (that reading drives the destructive branches).
+        case incompleteListing(String)
     }
 
     private let vaultDirectory: URL
 
-    /// `rootFolder` is the user-chosen folder; the `ClipySiVault/` layout is created inside it.
-    init(rootFolder: URL) throws {
+    /// `rootFolder` is the user-chosen folder; the vault lives in `ClipySiVault/` inside it.
+    ///
+    /// `createIfMissing` is false for every read-only use (status probes, unlock): creating the
+    /// layout as a side effect of *looking* would write into whatever folder is configured, and
+    /// would silently re-create an empty skeleton when the real vault is gone (unmounted volume,
+    /// moved folder) — which reads back as "an empty vault", not as "the vault is missing".
+    init(rootFolder: URL, createIfMissing: Bool = true) throws {
         self.vaultDirectory = rootFolder.appendingPathComponent("ClipySiVault", isDirectory: true)
+        guard createIfMissing else { return }
         for sub in ["", "records", "tombs", "devices"] {
             let dir = sub.isEmpty ? vaultDirectory : vaultDirectory.appendingPathComponent(sub, isDirectory: true)
             try FileManager.default.createDirectory(
@@ -92,17 +101,32 @@ struct LocalFolderProvider: SyncProvider {
 
     /// Filenames that parse as UUIDs (normalized lowercase). Anything else — conflicted copies,
     /// .DS_Store, tmp files mid-rename — is structurally not a record and is ignored.
+    ///
+    /// One kind of "anything else" must NOT be ignored: a cloud service that evicts a file's
+    /// contents replaces it with a placeholder (iCloud Drive: `.<name>.icloud`) and the real name
+    /// disappears from the directory. A namespace whose records are all evicted therefore lists as
+    /// *empty* rather than failing — and the engine reads an empty listing as "these records no
+    /// longer exist in the vault", which is what makes rejoin delete live history and GC drop
+    /// tombstones other devices have not applied. Surface it as an error instead.
     private func listIDs(in subdirectory: String, suffix: String) throws -> Set<String> {
         let dir = vaultDirectory.appendingPathComponent(subdirectory, isDirectory: true)
         let names = try FileManager.default.contentsOfDirectory(atPath: dir.path)
         var ids = Set<String>()
-        for name in names where name.hasSuffix(suffix) {
-            let stem = String(name.dropLast(suffix.count))
-            if let uuid = UUID(uuidString: stem) {
+        for name in names {
+            if name.hasSuffix(suffix), let uuid = UUID(uuidString: String(name.dropLast(suffix.count))) {
                 ids.insert(uuid.uuidString.lowercased())
+            } else if Self.isEvictedPlaceholder(name, suffix: suffix) {
+                throw ProviderError.incompleteListing(subdirectory)
             }
         }
         return ids
+    }
+
+    /// `records/abc….cclip` evicted by iCloud Drive becomes `records/.abc….cclip.icloud`.
+    private static func isEvictedPlaceholder(_ name: String, suffix: String) -> Bool {
+        let stub = ".icloud"
+        guard name.hasPrefix("."), name.hasSuffix(stub) else { return false }
+        return String(name.dropLast(stub.count)).hasSuffix(suffix)
     }
 
     private func file(in subdirectory: String, id: String, suffix: String) throws -> URL {
