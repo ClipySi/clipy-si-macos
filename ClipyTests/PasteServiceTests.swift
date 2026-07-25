@@ -62,6 +62,72 @@ import Testing
         #expect(service(defaults).betaAction(modifiers: .command) == .normal)
     }
 
+    // MARK: - Post-paste history effect (move-to-top / paste-and-delete)
+    //
+    // `paste(clipID:)` itself writes the real pasteboard and synthesizes ⌘V, so these drive the
+    // extracted `applyHistoryEffect(clipID:action:)` — the part that mutates history — directly.
+
+    /// Runs `body` against a paste service and a seeded clip, with an in-memory DB and a clock
+    /// fixed at `now` (so a move-to-top is observable as an exact `createdAt`).
+    private func withSeededClip(defaults: UserDefaults,
+                                now: Date,
+                                _ body: (PasteService, Clip) throws -> Void) throws {
+        try withDependencies {
+            $0.defaultDatabase = try TestDatabase.make()
+            $0.historyCipher = cipher
+            $0.date = .constant(now)
+        } operation: {
+            let repo = ClipRepository()
+            let clip = Make.clip(createdAt: Make.epoch)
+            try repo.add(clip)
+            let paste = PasteService(
+                blobStore: EncryptedBlobStore(directory: FileManager.default.temporaryDirectory),
+                settings: AppSettings(defaults: defaults),
+                accessibility: AccessibilityService(trustedCheck: { _ in true }),
+                frontmost: FrontmostAppGuard(provider: { "test" }),
+                markSeen: {})
+            try body(paste, clip)
+        }
+    }
+
+    @Test func pasteMovesClipToTopByDefault() throws {
+        let pastedAt = Make.epoch.addingTimeInterval(900)
+        try withSeededClip(defaults: freshDefaults(), now: pastedAt) { paste, clip in
+            paste.applyHistoryEffect(clipID: clip.id, action: .normal)
+
+            let stored = try #require(try ClipRepository().clip(id: clip.id))
+            #expect(stored.createdAt == pastedAt)  // moved to the top of the history
+            #expect(stored.updatedAt == pastedAt)  // …and visible to sync as a modification
+        }
+    }
+
+    @Test func plainTextPasteAlsoMovesClipToTop() throws {
+        let pastedAt = Make.epoch.addingTimeInterval(900)
+        try withSeededClip(defaults: freshDefaults(), now: pastedAt) { paste, clip in
+            paste.applyHistoryEffect(clipID: clip.id, action: .plainText)
+            let stored = try ClipRepository().clip(id: clip.id)
+            #expect(stored?.createdAt == pastedAt)
+        }
+    }
+
+    @Test func pasteLeavesHistoryOrderAloneWhenDisabled() throws {
+        let defaults = freshDefaults { $0.set(false, forKey: DefaultsKeys.moveClipToTopOnPaste) }
+        try withSeededClip(defaults: defaults, now: Make.epoch.addingTimeInterval(900)) { paste, clip in
+            paste.applyHistoryEffect(clipID: clip.id, action: .normal)
+            let stored = try ClipRepository().clip(id: clip.id)
+            #expect(stored?.createdAt == Make.epoch) // unchanged
+        }
+    }
+
+    @Test func pasteAndDeleteStillRemovesTheClip() throws {
+        // The delete action wins over the reorder: a removed clip must not be resurrected at the top.
+        try withSeededClip(defaults: freshDefaults(), now: Make.epoch.addingTimeInterval(900)) { paste, clip in
+            paste.applyHistoryEffect(clipID: clip.id, action: .pasteAndDelete)
+            let stored = try ClipRepository().clip(id: clip.id)
+            #expect(stored == nil)
+        }
+    }
+
     // MARK: - Payload assembly (decrypt-for-paste)
 
     @Test func payloadRestoresEveryRepresentation() throws {

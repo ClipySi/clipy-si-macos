@@ -26,7 +26,8 @@ struct GeneralPane: View {
     @Shared(.appStorage(DefaultsKeys.loginItem)) private var loginItem = false
     @Shared(.appStorage(DefaultsKeys.inputPasteCommand)) private var inputPasteCommand = true
     @Shared(.appStorage(DefaultsKeys.maxHistorySize)) private var maxHistorySize = 30
-    @Shared(.appStorage(DefaultsKeys.reorderClipsAfterPasting)) private var reorderAfterPasting = true
+    @Shared(.appStorage(DefaultsKeys.historySortNewestFirst)) private var historySortNewestFirst = true
+    @Shared(.appStorage(DefaultsKeys.moveClipToTopOnPaste)) private var moveClipToTopOnPaste = true
     @Shared(.appStorage(DefaultsKeys.showStatusItem)) private var showStatusItem = 1
     @Shared(.appStorage(DefaultsKeys.panelAccent)) private var panelAccent = PanelAccent.default.rawValue
     @Shared(.appStorage(DefaultsKeys.panelPreviewSide)) private var previewSide = PanelPreviewSide.right.rawValue
@@ -136,7 +137,12 @@ struct GeneralPane: View {
                     Text("Date Created").tag(0)
                     Text("Last Used").tag(1)
                 }
+                Toggle("Move a pasted item to the top of the history", isOn: Binding($moveClipToTopOnPaste))
                 Toggle("Input \"⌘ + V\" after menu item selection", isOn: Binding($inputPasteCommand))
+            } footer: {
+                Text("When on, an item you paste from the history moves back to the top. Turn it off to leave the history order unchanged.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Section {
@@ -204,12 +210,12 @@ struct GeneralPane: View {
         }
     }
 
-    /// Bridges the 2-item "sort order" popup to the stored `reorderClipsAfterPasting` Bool.
+    /// Bridges the 2-item "sort order" popup to the stored `historySortNewestFirst` Bool.
     private var sortOrderBinding: Binding<Int> {
         Binding(
-            get: { SettingsMapping.sortOrderIndex(reorderAfterPasting: reorderAfterPasting) },
+            get: { SettingsMapping.sortOrderIndex(newestFirst: historySortNewestFirst) },
             set: { newIndex in
-                $reorderAfterPasting.withLock { $0 = SettingsMapping.reorderAfterPasting(fromIndex: newIndex) }
+                $historySortNewestFirst.withLock { $0 = SettingsMapping.sortNewestFirst(fromIndex: newIndex) }
             }
         )
     }

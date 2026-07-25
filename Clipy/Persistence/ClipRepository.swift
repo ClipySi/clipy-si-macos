@@ -34,7 +34,7 @@ struct ClipRepository {
     }
 
     /// The newest (or, when `ascending` is true, oldest) `limit` live clips by `createdAt`. The
-    /// menu flips to ascending when `reorderClipsAfterPasting` is off, matching the original's
+    /// menu flips to ascending when `historySortNewestFirst` is off, matching the original's
     /// sort-direction flip (MenuManager.swift:281).
     func recentClips(limit: Int, ascending: Bool = false) throws -> [Clip] {
         // SQLite treats `LIMIT -1` as "no limit", so a negative cap would fetch the whole history
@@ -187,7 +187,7 @@ struct ClipRepository {
     }
 
     /// Moves a clip to the top of the history by bumping its timestamp (used after a paste when
-    /// `reorderClipsAfterPasting` is enabled). Bumps `updatedAt` too so the reorder is a visible
+    /// `moveClipToTopOnPaste` is enabled). Bumps `updatedAt` too so the reorder is a visible
     /// modification for sync (design §3.1).
     func moveToTop(id: Clip.ID, date: Date) throws {
         try database.write { db in

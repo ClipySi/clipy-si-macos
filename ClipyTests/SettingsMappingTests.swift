@@ -45,21 +45,21 @@ import Testing
         #expect(SettingsMapping.suggestedHistoryLimit(forTotal: 99_995) == 100_000)
     }
 
-    // MARK: - Sort-order popup ↔ reorder Bool
+    // MARK: - Sort-order popup ↔ newest-first Bool
 
     @Test func sortOrderIndexMatchesAppKitBoolBridging() {
         // false ⇒ index 0 ("Date Created"), true ⇒ index 1 ("Last Used").
-        #expect(SettingsMapping.sortOrderIndex(reorderAfterPasting: false) == 0)
-        #expect(SettingsMapping.sortOrderIndex(reorderAfterPasting: true) == 1)
+        #expect(SettingsMapping.sortOrderIndex(newestFirst: false) == 0)
+        #expect(SettingsMapping.sortOrderIndex(newestFirst: true) == 1)
     }
 
-    @Test func reorderBoolFromIndexIsInverseOfSortOrderIndex() {
-        #expect(SettingsMapping.reorderAfterPasting(fromIndex: 0) == false)
-        #expect(SettingsMapping.reorderAfterPasting(fromIndex: 1) == true)
+    @Test func sortBoolFromIndexIsInverseOfSortOrderIndex() {
+        #expect(SettingsMapping.sortNewestFirst(fromIndex: 0) == false)
+        #expect(SettingsMapping.sortNewestFirst(fromIndex: 1) == true)
         // Round-trips both ways.
         for value in [true, false] {
-            let index = SettingsMapping.sortOrderIndex(reorderAfterPasting: value)
-            #expect(SettingsMapping.reorderAfterPasting(fromIndex: index) == value)
+            let index = SettingsMapping.sortOrderIndex(newestFirst: value)
+            #expect(SettingsMapping.sortNewestFirst(fromIndex: index) == value)
         }
     }
 

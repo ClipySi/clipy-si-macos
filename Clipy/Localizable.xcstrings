@@ -13017,6 +13017,89 @@
         }
       }
     },
+    "Move a pasted item to the top of the history" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "نقل العنصر الملصق إلى أعلى السجل"
+          }
+        },
+        "bn" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "পেস্ট করা আইটেমকে ইতিহাসের শীর্ষে সরান"
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Eingesetztes Objekt an den Anfang des Verlaufs verschieben"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Mover el elemento pegado al principio del historial"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Déplacer l'élément collé en haut de l'historique"
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "चिपकाए गए आइटम को इतिहास में सबसे ऊपर ले जाएँ"
+          }
+        },
+        "id" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Pindahkan item yang ditempel ke bagian atas riwayat"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sposta l'elemento incollato in cima alla cronologia"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ペーストした項目を履歴の先頭に移動"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "붙여넣은 항목을 기록 맨 위로 이동"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Mover o item colado para o topo do histórico"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Перемещать вставленный элемент в начало истории"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "将粘贴的项目移到历史顶部"
+          }
+        }
+      }
+    },
     "Move instead of copying (removes the older one from the list)" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -23686,6 +23769,89 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "每个级别收集的内容"
+          }
+        }
+      }
+    },
+    "When on, an item you paste from the history moves back to the top. Turn it off to leave the history order unchanged." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "عند التفعيل، يعود العنصر الذي تلصقه من السجل إلى الأعلى. عطّله لترك ترتيب السجل دون تغيير."
+          }
+        },
+        "bn" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "চালু থাকলে, ইতিহাস থেকে পেস্ট করা আইটেম আবার শীর্ষে চলে যায়। ইতিহাসের ক্রম অপরিবর্তিত রাখতে এটি বন্ধ করুন।"
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Wenn aktiviert, wandert ein aus dem Verlauf eingesetzter Eintrag wieder an den Anfang. Deaktivieren Sie die Option, um die Reihenfolge des Verlaufs unverändert zu lassen."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Cuando está activado, el elemento que pegas desde el historial vuelve al principio. Desactívalo para no alterar el orden del historial."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Lorsque cette option est activée, l'élément que vous collez depuis l'historique remonte en haut. Désactivez-la pour laisser l'ordre de l'historique inchangé."
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "चालू होने पर, इतिहास से चिपकाया गया आइटम फिर से सबसे ऊपर आ जाता है। इतिहास का क्रम अपरिवर्तित रखने के लिए इसे बंद करें।"
+          }
+        },
+        "id" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Saat aktif, item yang Anda tempel dari riwayat akan kembali ke bagian atas. Matikan untuk membiarkan urutan riwayat tidak berubah."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Se attiva, l'elemento che incolli dalla cronologia torna in cima. Disattivala per lasciare invariato l'ordine della cronologia."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "オンのとき、履歴からペーストした項目が先頭に移動します。オフにすると履歴の並び順は変わりません。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "켜면 기록에서 붙여넣은 항목이 맨 위로 이동합니다. 끄면 기록 순서가 그대로 유지됩니다."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Quando ativado, o item que você cola a partir do histórico volta para o topo. Desative para deixar a ordem do histórico inalterada."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Когда включено, вставленный из истории элемент снова перемещается в начало. Отключите, чтобы порядок истории не менялся."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "开启后，从历史中粘贴的项目会重新移到顶部。关闭后历史顺序保持不变。"
           }
         }
       }

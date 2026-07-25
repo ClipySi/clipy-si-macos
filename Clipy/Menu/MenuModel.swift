@@ -88,12 +88,12 @@ struct MenuModel {
         self.settings = settings
     }
 
-    /// The history clips to display — newest- or oldest-first per `reorderClipsAfterPasting`, capped
+    /// The history clips to display — newest- or oldest-first per `historySortNewestFirst`, capped
     /// at `maxHistorySize`, each with its title decrypted. A DB failure degrades to an empty result
     /// rather than throwing into the build path. (The full unlimited count, once needed for the NSMenu
     /// "lo - hi" folder labels, is gone with that layout; the panel pages instead.)
     func history() -> [ClipDisplay] {
-        let ascending = !settings.reorderClipsAfterPasting
+        let ascending = !settings.historySortNewestFirst
         do {
             let clipRows = try clips.recentClips(limit: settings.maxHistorySize, ascending: ascending)
             return clipRows.map(displayBuilder.display(of:))

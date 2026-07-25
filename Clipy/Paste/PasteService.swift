@@ -13,6 +13,7 @@
 import AppKit
 import OSLog
 import Sauce
+import SQLiteData // re-exports swift-dependencies (@Dependency)
 
 @MainActor
 final class PasteService {
@@ -23,6 +24,8 @@ final class PasteService {
     enum BetaAction: Equatable { case normal, plainText, delete, pasteAndDelete }
 
     enum PasteError: Error { case clipNotFound, snippetNotFound }
+
+    @Dependency(\.date) private var date
 
     private let clips = ClipRepository()
     private let snippets = SnippetRepository()
@@ -73,10 +76,10 @@ final class PasteService {
             return
         }
 
-        // Paste-and-delete only removes the clip if the paste actually went through (a gate abort
-        // must not silently destroy history).
-        if writeAndPaste(payloads), action == .pasteAndDelete {
-            deleteClip(clipID)
+        // The history effects (delete / move-to-top) only run if the paste actually went through
+        // (a gate abort must not silently destroy or reorder history).
+        if writeAndPaste(payloads) {
+            applyHistoryEffect(clipID: clipID, action: action)
         }
     }
 
@@ -162,6 +165,30 @@ final class PasteService {
         }
         if settings.pastePlainText, pressed(settings.pastePlainTextModifier, modifiers) { return .plainText }
         return .normal
+    }
+
+    /// What a **successful** paste does to the history row it came from: `.pasteAndDelete` removes it,
+    /// otherwise `moveClipToTopOnPaste` (default ON) moves it back to the top so the history reads
+    /// most-recently-used first. Split out of `paste(clipID:)` — which writes the real pasteboard and
+    /// synthesizes ⌘V — so the decision is unit-testable.
+    ///
+    /// Off ⇒ the clip stays where it is, the original Clipy behaviour. Note this bumps `createdAt`
+    /// (the history's order key) and `updatedAt`, so the reorder is a normal modification for sync,
+    /// exactly like a re-copy under `overwriteSameHistory` (design §3.1).
+    func applyHistoryEffect(clipID: Clip.ID, action: BetaAction) {
+        switch action {
+        case .pasteAndDelete:
+            deleteClip(clipID)
+        case .normal, .plainText:
+            guard settings.moveClipToTopOnPaste else { return }
+            do {
+                try clips.moveToTop(id: clipID, date: date.now)
+            } catch {
+                Self.log.error("move-to-top after paste failed: \(error.localizedDescription, privacy: .public)")
+            }
+        case .delete:
+            break // handled before the paste — the clip is already gone
+        }
     }
 
     /// The representations to restore: every captured UTType (primary + secondaries), or just the
