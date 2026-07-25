@@ -8,7 +8,7 @@ macOS のクリップボードマネージャ。[Clipy](https://github.com/Clipy
 
 ## リポジトリ構成
 - `Clipy/` … アプリ本体（`Clipy.xcodeproj`）。テストは `ClipyTests/`。
-- `Scripts/` … `gate.sh`（マージ前ローカルゲート）/ `redaction-grep.sh`（秘匿性の静的チェック）/ `release-notarize.sh`（署名・公証・配布）。
+- `Scripts/` … `gate.sh`（マージ前ローカルゲート）/ `redaction-grep.sh`（秘匿性の静的チェック）/ `release-notarize.sh`（署名・公証）/ `release-dmg.sh`（配布用 DMG の作成・公証）。
 - `docs/` … 利用者・開発者向けの公開ドキュメント。
 - `tools/clipy-realm-export/` … 旧 Clipy（Realm）履歴のエクスポータ（移行用・アプリ本体には非リンク）。
 - 暗号・機密マスキング・record/vault フォーマット・同期の共有ロジックは、別リポジトリの Rust コア **`clipy-si-core`**。リリースアプリにはビルド済みバイナリ（XCFramework）として静的リンクされる（実装はこの公開リポジトリには含まれない）。
