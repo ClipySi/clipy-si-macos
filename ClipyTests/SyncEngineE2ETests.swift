@@ -2,11 +2,10 @@
 //  SyncEngineE2ETests.swift
 //  ClipyTests
 //
-//  Two devices in one process: separate in-memory DBs, separate LOCAL cipher keys and
-//  blob dirs, one shared vault key and one shared temp folder (LocalFolderProvider). Proves the
-//  design's done-criteria end to end: round-trip, delete propagation, re-copy-after-tombstone,
-//  offline catch-up, cross-device dedupe, the double security gate, no plaintext in the folder,
-//  and the zombie-prevention protocol (stale rejoin after GC).
+//  Two devices in one process (see SyncE2EHarness). Proves the design's done-criteria end to end:
+//  round-trip, delete propagation, re-copy-after-tombstone, offline catch-up, cross-device dedupe,
+//  the double security gate, no plaintext in the folder, and the zombie-prevention protocol
+//  (stale rejoin after GC). Rejoin's safety guards live in SyncRejoinSafetyTests.
 //
 
 import ClipySiCore
@@ -16,111 +15,7 @@ import SQLiteData
 import Testing
 @testable import Clipy
 
-@Suite struct SyncEngineE2ETests {
-    private static let vaultKey = VaultKey(SymmetricKey(data: Data(repeating: 0x44, count: 32)))
-    private static let textType = "public.utf8-plain-text"
-
-    private struct Device {
-        let db: any DatabaseWriter
-        let cipher: HistoryCipher
-        let blobStore: EncryptedBlobStore
-        let deviceID: String
-        let engine: Clipy.SyncEngine // qualified: another imported module also names a SyncEngine
-        var masker: MaskingService = .identity
-    }
-
-    private struct World {
-        let folder: URL
-        var deviceA: Device
-        var deviceB: Device
-
-        func cleanUp() {
-            try? FileManager.default.removeItem(at: folder)
-            try? FileManager.default.removeItem(at: deviceA.blobStore.directory)
-            try? FileManager.default.removeItem(at: deviceB.blobStore.directory)
-        }
-    }
-
-    private func day(_ offset: Int) -> Date { Make.epoch.addingTimeInterval(TimeInterval(offset) * 86_400) }
-
-    private func makeDevice(folder: URL, keyByte: UInt8) throws -> Device {
-        let blobDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("ClipySiE2E-\(UUID().uuidString)", isDirectory: true)
-        let blobStore = EncryptedBlobStore(directory: blobDir)
-        let deviceID = UUID().uuidString.lowercased()
-        let engine = Clipy.SyncEngine(
-            provider: try LocalFolderProvider(rootFolder: folder),
-            vaultKey: Self.vaultKey,
-            blobStore: blobStore,
-            deviceID: deviceID
-        )
-        return Device(
-            db: try TestDatabase.make(),
-            cipher: HistoryCipher(key: SymmetricKey(data: Data(repeating: keyByte, count: 32))),
-            blobStore: blobStore,
-            deviceID: deviceID,
-            engine: engine
-        )
-    }
-
-    private func makeWorld() throws -> World {
-        let folder = FileManager.default.temporaryDirectory
-            .appendingPathComponent("ClipySiE2EVault-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        return World(
-            folder: folder,
-            deviceA: try makeDevice(folder: folder, keyByte: 0x0A),
-            deviceB: try makeDevice(folder: folder, keyByte: 0x0B)
-        )
-    }
-
-    /// Run `body` in `device`'s dependency world (its DB, local cipher, masker, clock).
-    private func on<T>(_ device: Device, at now: Date, _ body: () async throws -> T) async throws -> T {
-        try await withDependencies {
-            $0.defaultDatabase = device.db
-            $0.historyCipher = device.cipher
-            $0.maskingService = device.masker
-            $0.date = .constant(now)
-        } operation: {
-            try await body()
-        }
-    }
-
-    /// Capture a text clip on a device (the minimal capture path: encrypted title + blob + row).
-    @discardableResult
-    private func capture(_ text: String, on device: Device, at now: Date,
-                         syncEligible: Bool = true, sourceBundle: String? = nil) async throws -> Clip {
-        try await on(device, at: now) {
-            let data = Data(text.utf8)
-            let blobPath = try device.blobStore.write(data)
-            let clip = Clip(
-                id: UUID(),
-                contentHash: device.cipher.contentHash(CanonicalPayload.make([(Self.textType, data)])),
-                titleCipher: try device.cipher.seal(data),
-                primaryType: Self.textType,
-                createdAt: now,
-                isPinned: false,
-                isColorCode: false,
-                dataPath: blobPath,
-                thumbnailID: nil,
-                sourceBundle: sourceBundle,
-                updatedAt: now,
-                originDeviceID: device.deviceID,
-                syncEligible: syncEligible
-            )
-            try ClipRepository().add(clip)
-            return clip
-        }
-    }
-
-    private func titles(on device: Device, at now: Date) async throws -> [String] {
-        try await on(device, at: now) {
-            try ClipRepository().clips().compactMap {
-                String(data: try device.cipher.open($0.titleCipher), encoding: .utf8)
-            }
-        }
-    }
-
+@Suite struct SyncEngineE2ETests: SyncE2EHarness {
     // MARK: - Tests
 
     @Test func roundTripDeliversAcrossDevices() async throws {

@@ -11,13 +11,17 @@
 //    push   — never-published live clips (records are immutable once published) through the
 //             double security gate, sealed under the VAULT key; then undistributed tombstones
 //             (write tombs/{id}, remove records/{id}).
-//    rejoin — own published records absent from BOTH listings: stale self deletes locally
-//             (never re-publishes — the zombie guard), fresh self re-publishes (provider loss).
+//    rejoin — applied records absent from BOTH listings: stale self deletes them locally (never
+//             re-publishes — the zombie guard), fresh self re-publishes the ones IT published
+//             (provider loss). Both directions are destructive, so neither runs unless the vault
+//             is demonstrably readable and this device's own freshness can be read from it.
 //    gc     — tombstone files past retention acked by every non-stale device are removed, and
 //             only then is the local tombstone row purged (it backs dedupe-vs-wipe lookups).
 //
 //  Per-file failures are skipped (the next session retries — the applied set makes replay
-//  idempotent); nothing here logs content, keys, or paths.
+//  idempotent); nothing here logs content, keys, or paths. What a listing does NOT contain is
+//  only meaningful when the provider can prove it enumerated completely — an absent record and an
+//  unreadable folder are the same bytes, and only one of them means "deleted".
 //
 
 import ClipySiCore
@@ -36,6 +40,12 @@ struct SyncSummary: Sendable, Equatable {
 }
 
 actor SyncEngine {
+    enum SessionError: Error {
+        /// The folder does not currently present the vault we joined. Its listings say nothing
+        /// about what exists, so the session stops before anything destructive runs.
+        case vaultUnreachable
+    }
+
     private let provider: any SyncProvider
     private let vaultKey: VaultKey
     private let blobStore: EncryptedBlobStore
@@ -55,6 +65,13 @@ actor SyncEngine {
         var summary = SyncSummary()
         let nowMillis = Int64(now.timeIntervalSince1970 * 1000)
         let nowSecs = Int64(now.timeIntervalSince1970)
+
+        // `vault.json` is the proof that this folder still IS the vault we joined. Without it the
+        // listings below are meaningless — an unmounted volume, a moved folder, or a folder whose
+        // contents have not synced yet all enumerate as an empty vault, and rejoin/GC would act on
+        // that emptiness as if the records had been deleted.
+        let manifest = (try? provider.readVaultManifest()).flatMap { $0 }
+        guard manifest != nil else { throw SessionError.vaultUnreachable }
 
         let recordIDs = try provider.listRecordIDs()
         let tombIDs = try provider.listTombstoneIDs()
@@ -198,14 +215,14 @@ actor SyncEngine {
         let missing = try store.appliedEntries().filter { !$0.deleted && !present.contains($0.recordID) }
         guard !missing.isEmpty else { return }
 
-        let action: RejoinActionFfi
-        if let lastSeen = try ownLastSeen() {
-            action = rejoinAction(selfLastSeenSecs: lastSeen, nowSecs: nowSecs)
-        } else {
-            // No own heartbeat but a non-empty applied set: can't prove freshness either way —
-            // prefer restoring the user's data (manual tampering is the realistic cause).
-            action = .repush
-        }
+        // Both branches are destructive in opposite directions — DeleteLocally drops history that
+        // may only *look* absent, Repush undoes deletions other devices made — and which one is
+        // safe is decided entirely by our own freshness. Without a heartbeat in the vault to read
+        // it from, neither is defensible, so do nothing and let a session that has one decide.
+        // (The old fallback here was Repush, which resurrected records whenever `devices/{id}.json`
+        // happened to be unreadable.)
+        guard let selfLastSeen = ownLastSeen() else { return }
+        let action = rejoinAction(selfLastSeenSecs: selfLastSeen, nowSecs: nowSecs)
 
         for entry in missing {
             guard let clipID = UUID(uuidString: entry.recordID) else { continue }
@@ -221,9 +238,15 @@ actor SyncEngine {
                     deleted: true
                 )
             case .repush:
-                if let clip = try repo.clip(id: clipID) {
-                    try publish(clip, nowMillis: nowMillis, summary: &summary)
-                }
+                // Only records THIS device published — the core's precondition for Repush is a
+                // record "we previously published". Re-publishing a *pulled* record would restore
+                // a file whose origin device deliberately deleted it (tombstone since GC'd),
+                // putting that ciphertext back in the vault and onto every device that joins later.
+                // Its own origin device, if it still holds it, is the one that restores it.
+                guard let clip = try repo.clip(id: clipID),
+                      clip.originDeviceID?.lowercased() == deviceID
+                else { continue }
+                try publish(clip, nowMillis: nowMillis, summary: &summary)
             }
         }
     }
@@ -351,8 +374,14 @@ actor SyncEngine {
         for id in try provider.listRecordIDs() where tombIDs.contains(id) {
             try? provider.deleteRecord(id: id)
         }
+        // `touchDevice` ran moments ago, so a readable `devices/` always lists at least this
+        // device. Empty means the enumeration is not trustworthy — and `gc_eligible` with an empty
+        // device list has nobody left to wait for, so it would happily delete tombstones that no
+        // device has acknowledged.
+        let deviceIDs = try provider.listDeviceIDs()
+        guard !deviceIDs.isEmpty else { return }
         var lastSeens: [Int64] = []
-        for id in try provider.listDeviceIDs() {
+        for id in deviceIDs {
             if let seen = try? deviceLastSeen(id: id) {
                 lastSeens.append(seen)
             }
@@ -444,9 +473,13 @@ private extension SyncEngine {
         try store.mergeClock(merged)
     }
 
-    func ownLastSeen() throws -> Int64? {
-        guard let bytes = try? provider.readDevice(id: deviceID) else { return nil }
-        return try deviceLastSeen(data: bytes)
+    /// This device's `last_seen` as recorded in the vault, or nil when it cannot be read — the
+    /// caller must treat nil as "freshness unknown", never as a default.
+    func ownLastSeen() -> Int64? {
+        guard let bytes = try? provider.readDevice(id: deviceID),
+              let seen = try? deviceLastSeen(data: bytes)
+        else { return nil }
+        return seen
     }
 
     func deviceLastSeen(id: String) throws -> Int64? {
