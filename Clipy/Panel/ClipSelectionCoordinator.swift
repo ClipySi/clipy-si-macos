@@ -122,24 +122,27 @@ final class ClipSelectionCoordinator {
     /// The current history rows (newest- or oldest-first per settings), decrypted + masked. Capped at
     /// `maxHistorySize`. Each carries `.clip` kind so the unified panel routes its paste through the gate.
     func historyRows() -> [PanelRow] {
-        model.history().map { display in
-            let body = Self.displayBody(for: display)
-            var kind = Self.contentKind(for: display)
-            var language: String?
-            // Code detection runs only on plain-text candidates. A masked secret is all
-            // bullets — no code structure — so it stays `.text` by construction.
-            if kind == .text, let detected = CodeClassifier.classify(body) {
-                kind = .code
-                language = detected.rawValue
+        let displays = model.history()
+        return PanelSignpost.measure(.historyClassify, rows: displays.count) {
+            displays.map { display in
+                let body = Self.displayBody(for: display)
+                var kind = Self.contentKind(for: display)
+                var language: String?
+                // Code detection runs only on plain-text candidates. A masked secret is all
+                // bullets — no code structure — so it stays `.text` by construction.
+                if kind == .text, let detected = CodeClassifier.classify(body) {
+                    kind = .code
+                    language = detected.rawValue
+                }
+                return PanelRow.clip(display.id,
+                                     title: body,
+                                     isSecret: display.isSecret,
+                                     decryptFailed: display.decryptFailed,
+                                     contentKind: kind,
+                                     codeLanguage: language,
+                                     createdAt: display.createdAt,
+                                     sourceBundle: display.sourceBundle)
             }
-            return PanelRow.clip(display.id,
-                                 title: body,
-                                 isSecret: display.isSecret,
-                                 decryptFailed: display.decryptFailed,
-                                 contentKind: kind,
-                                 codeLanguage: language,
-                                 createdAt: display.createdAt,
-                                 sourceBundle: display.sourceBundle)
         }
     }
 

@@ -234,6 +234,11 @@ final class HistoryPanelController {
     /// if given, else the cursor), take key without activating the app, and start the outside-click
     /// monitor. `anchorPoint` is a screen point used as the panel's top-left (the status item's bottom-left).
     private func show(scope: HistoryPanelModel.Scope, anchorPoint: CGPoint?) {
+        // M-UI.11 P0 baseline: the whole open is synchronous today, so first-rows and shell end
+        // back to back — the two intervals exist to show that gap opening up once show-first lands.
+        let openToShell = PanelSignpost.begin(.openToShell)
+        let openToFirstRows = PanelSignpost.begin(.openToFirstRows)
+
         // Snapshot the paste target (DEBUG focus PoC) BEFORE we touch the panel.
         #if DEBUG
         let before = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
@@ -246,7 +251,13 @@ final class HistoryPanelController {
         model.itemsPerPage = config.itemsPerPage
         model.startWithZero = config.startWithZero
         model.markedWithNumbers = config.markedWithNumbers
-        model.reset(historyRows: coordinator.historyRows(), snippetRows: coordinator.snippetRows(), scope: scope)
+        let historyRows = coordinator.historyRows()
+        let snippetRows = PanelSignpost.measure(.snippetRowsBuild) { coordinator.snippetRows() }
+        let rowCount = historyRows.count + snippetRows.count
+        PanelSignpost.measure(.modelCommit, rows: rowCount) {
+            model.reset(historyRows: historyRows, snippetRows: snippetRows, scope: scope)
+        }
+        PanelSignpost.end(.openToFirstRows, openToFirstRows, rows: rowCount)
 
         // Apply the persisted preview-pane preference before positioning, so the cursor clamp math
         // sees the size the panel will actually open at (expanded panels near a screen edge must
@@ -266,6 +277,7 @@ final class HistoryPanelController {
         panel.makeKeyAndOrderFront(nil)
         // Push first responder into the hosted SwiftUI content so it can receive key events (arrow/Return).
         panel.makeFirstResponder(hosting.view)
+        PanelSignpost.end(.openToShell, openToShell, rows: rowCount)
 
         #if DEBUG
         // Focus PoC (§2.5): did taking key steal frontmost? With `.nonactivatingPanel` it should not.

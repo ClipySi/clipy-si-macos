@@ -109,16 +109,23 @@ final class HistoryPanelModel {
     }
 
     /// `scopedRows` narrowed by the category chip, then by the live `searchText` (header-aware; C3
-    /// over masked clip titles). Chain: scope → category → search.
+    /// over masked clip titles). Chain: scope → category → search. Signposted per recomputation —
+    /// SwiftUI re-runs this full-array pipeline inside body/update (M-UI.11 P0 baseline; P1
+    /// replaces it with a stored snapshot).
     var filteredRows: [PanelRow] {
-        PanelSearch.filterCombined(PanelFilter.filter(scopedRows, category: category), query: searchText)
+        PanelSignpost.measure(.searchFilter, rows: historyRows.count + snippetRows.count) {
+            PanelSearch.filterCombined(PanelFilter.filter(scopedRows, category: category), query: searchText)
+        }
     }
 
     /// Per-category counts for the filter chips' badges: over the current scope's rows AFTER the
     /// live search (but before the category itself), so a badge never promises N items that the
-    /// active query then narrows to zero (adversarial review).
+    /// active query then narrows to zero (adversarial review). Signposted per recomputation — a
+    /// second full-array pass on top of `filteredRows` today (M-UI.11 P0 baseline).
     var categoryCounts: [PanelCategory: Int] {
-        PanelFilter.counts(PanelSearch.filterCombined(scopedRows, query: searchText))
+        PanelSignpost.measure(.categoryCounts, rows: historyRows.count + snippetRows.count) {
+            PanelFilter.counts(PanelSearch.filterCombined(scopedRows, query: searchText))
+        }
     }
 
     /// True when a non-All category chip is narrowing the rows (drives the toggle's active tint and

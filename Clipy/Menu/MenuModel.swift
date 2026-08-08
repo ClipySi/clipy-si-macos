@@ -95,8 +95,12 @@ struct MenuModel {
     func history() -> [ClipDisplay] {
         let ascending = !settings.historySortNewestFirst
         do {
-            let clipRows = try clips.recentClips(limit: settings.maxHistorySize, ascending: ascending)
-            return clipRows.map(displayBuilder.display(of:))
+            let clipRows = try PanelSignpost.measureCounted(.historyFetch) {
+                try clips.recentClips(limit: settings.maxHistorySize, ascending: ascending)
+            }
+            return PanelSignpost.measure(.historyDecryptMask, rows: clipRows.count) {
+                clipRows.map(displayBuilder.display(of:))
+            }
         } catch {
             Self.log.error("history read failed: \(error.localizedDescription, privacy: .public)")
             return []
