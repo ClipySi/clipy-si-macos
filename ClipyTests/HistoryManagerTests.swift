@@ -91,6 +91,71 @@ import Testing
         }
     }
 
+    // MARK: - Window query (P0-C hotfix, history-performance plan v2 §6)
+
+    /// `liveWindow` backs BOTH the initial `@FetchAll` and the explicit `loadWindow()` reload. The
+    /// reload used to rebuild the window WITHOUT the `deletedAt IS NULL` filter, so tombstones
+    /// (content wiped → undecryptable) surfaced as ghost rows after any explicit reload.
+    ///
+    /// Boundary: these tests pin the SHARED QUERY's semantics; that both view paths consume that
+    /// one symbol is a structural fact of HistoryManagerView (the property wrapper and `loadWindow`
+    /// both reference `Self.liveWindow`) which a unit test can't drive — `.task`/`@FetchAll` only
+    /// run inside a rendered view. Re-introducing an inline query there is what code review must
+    /// keep out.
+    @Test func liveWindowExcludesTombstonesOnBothLoadPaths() throws {
+        let database = try TestDatabase.make()
+        try withDependencies {
+            $0.defaultDatabase = database
+            $0.date = .constant(Make.epoch)
+        } operation: {
+            let repo = ClipRepository()
+            for index in 0..<10 {
+                try repo.add(Make.clip(createdAt: Make.epoch.addingTimeInterval(Double(index))))
+            }
+            // Soft-delete the 3 NEWEST rows — if the filter leaked they would sit at the window head.
+            for clip in try repo.clips().prefix(3) {
+                try repo.delete(id: clip.id, soft: true)
+            }
+
+            let rows = try database.read { db in try HistoryManagerView.liveWindow.fetchAll(db) }
+            // Count-shaped so a failure message carries only integers, never a [Clip] dump (§3.2).
+            let ghostRows = rows.count { $0.deletedAt != nil }
+            #expect(rows.count == 7)
+            #expect(ghostRows == 0)
+        }
+    }
+
+    /// Tombstones must not consume window slots either: with exactly `windowLimit` live rows plus
+    /// newer tombstones, the window returns every live row and no truncation sentinel (the +1 row
+    /// that makes `windowTruncated` show its "covers the most recent N" notice).
+    @Test func tombstonesConsumeNoWindowSlotsAndTripNoTruncationSentinel() throws {
+        let database = try TestDatabase.make()
+        try withDependencies {
+            $0.defaultDatabase = database
+        } operation: {
+            let limit = HistoryManagerView.windowLimit
+            try database.write { db in
+                for index in 0..<limit {
+                    let clip = Make.clip(createdAt: Make.epoch.addingTimeInterval(Double(index)))
+                    try Clip.insert { clip }.execute(db)
+                }
+                // Newer than every live row: a leaked filter would rank these first AND push
+                // live rows past the LIMIT.
+                for index in 0..<60 {
+                    var dead = Make.clip(createdAt: Make.epoch.addingTimeInterval(Double(limit + index)))
+                    dead.deletedAt = Make.epoch
+                    dead.titleCipher = Data()
+                    try Clip.insert { dead }.execute(db)
+                }
+            }
+
+            let rows = try database.read { db in try HistoryManagerView.liveWindow.fetchAll(db) }
+            let ghostRows = rows.count { $0.deletedAt != nil }
+            #expect(rows.count == limit, "all live rows fit; no sentinel row → no truncation notice")
+            #expect(ghostRows == 0)
+        }
+    }
+
     @Test func pdfAndFileClipsGetTypeLabelsAndPlaceholders() throws {
         try withDependencies {
             $0.historyCipher = cipher

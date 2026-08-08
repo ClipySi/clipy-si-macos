@@ -21,7 +21,19 @@ private let historyPageSize = 50
 private let historyWindowLimit = 500
 
 struct HistoryManagerView: View {
-    @FetchAll(Clip.where { $0.deletedAt.is(nil) }.order { $0.createdAt.desc() }.limit(historyWindowLimit + 1)) private var clips
+    /// The manager's bounded window: the newest `historyWindowLimit` LIVE clips (+1 sentinel row that
+    /// only signals truncation). The single source of truth for both the initial `@FetchAll` and the
+    /// explicit `loadWindow()` reload — a tombstoned row (`deletedAt` set, `titleCipher` blanked) must
+    /// never surface as a decryption-failed ghost or consume a window slot on either path.
+    static var liveWindow: SelectOf<Clip> {
+        Clip.where { $0.deletedAt.is(nil) }.order { $0.createdAt.desc() }.limit(historyWindowLimit + 1)
+    }
+
+    /// The window's row budget (sans the truncation sentinel) — exposed so tests can pin the
+    /// boundary behavior of `liveWindow` without duplicating the constant.
+    static let windowLimit = historyWindowLimit
+
+    @FetchAll(HistoryManagerView.liveWindow) private var clips
     @State private var page = 0
     @State private var selection: Clip.ID?
     @State private var loadError: String?
@@ -299,7 +311,7 @@ struct HistoryManagerView: View {
         loadError = nil
         do {
             try await $clips
-                .load(Clip.order { $0.createdAt.desc() }.limit(historyWindowLimit + 1))
+                .load(Self.liveWindow)
                 .task
         } catch is CancellationError {
         } catch {
