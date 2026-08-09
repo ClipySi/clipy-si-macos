@@ -59,6 +59,14 @@ struct PanelRow: Identifiable, Equatable, Sendable {
     /// Bundle id of the app the clip was copied from, when known (`org.nspasteboard.source`); the preview
     /// pane resolves it to an app name. Nil for snippets/folders and most clips.
     var sourceBundle: String?
+    /// The record's last-modified stamp, carried into classification-cache keys (M-UI.11 P1).
+    /// Nil for snippet/folder rows and test-synthesised clips (which are never lazily classified).
+    var updatedAt: Date?
+    /// The row was built WITHOUT running `CodeClassifier` (a plain-text clip candidate): the panel
+    /// model resolves it lazily — visible page, title-dependent category, or chip counts — through
+    /// `PanelClassificationCache`. Rows constructed with an explicit `contentKind` (snippets,
+    /// non-text clips, tests) leave this false and are never re-classified.
+    var needsCodeClassification = false
 
     /// Folder headers are display-only; everything else can be highlighted, numbered, and pasted.
     var isSelectable: Bool {
@@ -119,31 +127,34 @@ final class ClipSelectionCoordinator {
                              markedWithNumbers: settings.menuItemsAreMarkedWithNumbers)
     }
 
-    /// The current history rows (newest- or oldest-first per settings), decrypted + masked. Capped at
-    /// `maxHistorySize`. Each carries `.clip` kind so the unified panel routes its paste through the gate.
-    func historyRows() -> [PanelRow] {
-        let displays = model.history()
-        return PanelSignpost.measure(.historyClassify, rows: displays.count) {
-            displays.map { display in
-                let body = Self.displayBody(for: display)
-                var kind = Self.contentKind(for: display)
-                var language: String?
-                // Code detection runs only on plain-text candidates. A masked secret is all
-                // bullets — no code structure — so it stays `.text` by construction.
-                if kind == .text, let detected = CodeClassifier.classify(body) {
-                    kind = .code
-                    language = detected.rawValue
-                }
-                return PanelRow.clip(display.id,
-                                     title: body,
-                                     isSecret: display.isSecret,
-                                     decryptFailed: display.decryptFailed,
-                                     contentKind: kind,
-                                     codeLanguage: language,
-                                     createdAt: display.createdAt,
-                                     sourceBundle: display.sourceBundle)
-            }
+    /// The current history rows (newest- or oldest-first per settings), decrypted + masked under
+    /// the request's one resolved `policy`. Each carries `.clip` kind so the unified panel routes
+    /// its paste through the gate. M-UI.11 P1: rows are built WITHOUT running `CodeClassifier` —
+    /// the P0 baseline showed classification dominates the open (~220 µs/row, an order of
+    /// magnitude over decrypt+mask) — plain-text candidates are flagged for the model's lazy,
+    /// cached resolution instead.
+    func historyRows(policy: DisplayPolicy) -> [PanelRow] {
+        model.history(policy: policy).map { display in
+            let body = Self.displayBody(for: display)
+            let kind = Self.contentKind(for: display)
+            var row = PanelRow.clip(display.id,
+                                    title: body,
+                                    isSecret: display.isSecret,
+                                    decryptFailed: display.decryptFailed,
+                                    contentKind: kind,
+                                    createdAt: display.createdAt,
+                                    sourceBundle: display.sourceBundle)
+            row.updatedAt = display.updatedAt
+            // Only plain-text candidates can be upgraded to `.code`. A masked secret is all
+            // bullets — no code structure — so flagging it is harmless (cached verdict: not code);
+            // a decrypt-failed placeholder is skipped outright.
+            row.needsCodeClassification = kind == .text && !display.decryptFailed
+            return row
         }
+    }
+
+    func historyRows() -> [PanelRow] {
+        historyRows(policy: .current(settings: model.settings))
     }
 
     /// The coarse content type behind a clip row's leading glyph. Reliable signals only: the

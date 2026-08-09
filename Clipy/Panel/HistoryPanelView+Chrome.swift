@@ -108,9 +108,10 @@ extension HistoryPanelView {
     /// bar must never keep narrowing the list (and the funnel must not stay tinted — user feedback).
     func toggleFilterBar() {
         guard model.scope != .snippets else { return }
-        model.isFilterBarOpen.toggle()
-        if !model.isFilterBarOpen {
-            model.setCategory(.all)
+        if model.isFilterBarOpen {
+            model.closeFilterBar() // clears the category too, in one snapshot rebuild
+        } else {
+            model.isFilterBarOpen = true
         }
     }
 

@@ -19,6 +19,14 @@
 import Foundation
 
 enum CodeClassifier {
+    /// The cache-invalidation contract for classification results (M-UI.11 P1). Derivation caches
+    /// (PanelClassificationCache, and any future persisted `contentKind`) key their entries on this
+    /// version. ANY change that can alter a verdict — signature markers, the structure gates,
+    /// `scanLimit`, the language set, the JSON/HTML/YAML fast paths — MUST bump it, or stale
+    /// verdicts keep being served for unchanged titles. Reviewers: a diff in this file that does
+    /// not bump `algorithmVersion` needs an explicit "output-identical" justification.
+    static let algorithmVersion: UInt16 = 1
+
     /// Languages the classifier can name (and the highlighter has keyword sets for). The raw value
     /// is the display label shown in the preview header chip.
     enum Language: String, CaseIterable, Sendable {

@@ -49,15 +49,17 @@ struct SnippetRepository {
 
     /// Every folder (ordered by `sortOrder`) with its snippets (ordered by `sortOrder`). The snippet
     /// menu and editor read this; enabled-filtering is applied by the consumer, not here.
+    /// Two bounded queries, not one per folder (M-UI.11 P1): all snippets come in one ordered read
+    /// and are grouped in memory — `Dictionary(grouping:)` preserves the fetch order per folder, so
+    /// each folder's snippets stay `sortOrder`-ascending exactly as the per-folder queries returned.
     func fetchFolderDetails() throws -> [SnippetFolderDetail] {
         try database.read { db in
             let folders = try SnippetFolder.order(by: \.sortOrder).fetchAll(db)
-            return try folders.map { folder in
-                let snippets = try Snippet
-                    .where { $0.folderID.eq(folder.id) }
-                    .order(by: \.sortOrder)
-                    .fetchAll(db)
-                return SnippetFolderDetail(folder: folder, snippets: snippets)
+            let snippetsByFolder = Dictionary(
+                grouping: try Snippet.order(by: \.sortOrder).fetchAll(db),
+                by: \.folderID)
+            return folders.map { folder in
+                SnippetFolderDetail(folder: folder, snippets: snippetsByFolder[folder.id] ?? [])
             }
         }
     }

@@ -213,6 +213,38 @@ import Testing
         }
     }
 
+    /// M-UI.11 P1: the model-level open commit. `reset()` rebuilds the stored snapshot once and
+    /// classifies ONLY the visible page through PanelClassificationCache — where the P0 pipeline
+    /// classified every row up front (~220 µs/row). The first iteration is the cold-cache cost
+    /// (visible in max); later iterations are the warm re-open. The one-shot `chipsExactCounts`
+    /// line prices the deferred full classification that opening the filter bar triggers.
+    @MainActor @Test func modelResetBaseline() throws {
+        let clock = ContinuousClock()
+        for size in [500, 5_000] {
+            var rng = SeededGenerator(seed: 0xC11B_0A5E)
+            let rows = (0..<size).map { index in
+                var row = PanelRow.clip(UUID(), title: PerfFixture.title(at: index, using: &rng))
+                row.updatedAt = Date(timeIntervalSince1970: TimeInterval(index))
+                row.needsCodeClassification = true
+                return row
+            }
+            let model = HistoryPanelModel()
+            model.itemsPerPage = 10
+            var resetSamples: [Duration] = []
+            for _ in 0..<7 {
+                resetSamples.append(clock.measure {
+                    model.reset(historyRows: rows, snippetRows: [])
+                })
+            }
+            report("modelResetLazyClassify", size: size, rows: size, resetSamples)
+
+            let chipsTime = clock.measure { model.isFilterBarOpen = true }
+            report("chipsExactCounts", size: size, rows: size, [chipsTime])
+            #expect(model.visibleRows.count == 10)
+            #expect(model.categoryCounts[.all] == size)
+        }
+    }
+
     /// One summary line per stage: counts and milliseconds only (§3.2 non-leak contract).
     /// p50/min/max — with ≤7 samples a p95 would just be the max wearing a lab coat.
     private func report(_ stage: String, size: Int, rows: Int, _ samples: [Duration], extra: String = "") {

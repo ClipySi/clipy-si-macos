@@ -247,15 +247,19 @@ final class HistoryPanelController {
 
         // Apply the per-open paging config, then refill from a fresh history snapshot. `reset` returns
         // to page 0, highlights the top row, and bumps openToken to re-drive list focus (panel reuse).
+        // The display policy is resolved ONCE for the whole open (M-UI.11 P1) and swapped in WITH
+        // the rows inside reset — a separate stamp would resolve the previous open's rows under the
+        // new policy and poison the classification cache (review).
         let config = coordinator.panelSettings
+        let policy = DisplayPolicy.current()
         model.itemsPerPage = config.itemsPerPage
         model.startWithZero = config.startWithZero
         model.markedWithNumbers = config.markedWithNumbers
-        let historyRows = coordinator.historyRows()
+        let historyRows = coordinator.historyRows(policy: policy)
         let snippetRows = PanelSignpost.measure(.snippetRowsBuild) { coordinator.snippetRows() }
         let rowCount = historyRows.count + snippetRows.count
         PanelSignpost.measure(.modelCommit, rows: rowCount) {
-            model.reset(historyRows: historyRows, snippetRows: snippetRows, scope: scope)
+            model.reset(historyRows: historyRows, snippetRows: snippetRows, scope: scope, policy: policy)
         }
         PanelSignpost.end(.openToFirstRows, openToFirstRows, rows: rowCount)
 

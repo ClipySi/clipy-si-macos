@@ -28,6 +28,17 @@ struct MaskingResult: Sendable, Equatable {
 struct MaskingService: Sendable {
     /// Evaluate a decrypted clip title. Pure with respect to the input; reads current settings.
     var evaluate: @Sendable (_ text: String) -> MaskingResult
+    /// Resolve `policy` ONCE and return the request-scoped evaluator (M-UI.11 P1): a whole open's
+    /// rows are evaluated under one settings snapshot instead of one UserDefaults read per row.
+    var makeEvaluator: @Sendable (_ policy: DisplayPolicy) -> @Sendable (_ text: String) -> MaskingResult
+
+    /// `makeEvaluator` defaults to ignoring the policy and reusing `evaluate` — the right meaning
+    /// for the identity value and for tests that inject a plain closure.
+    init(evaluate: @escaping @Sendable (_ text: String) -> MaskingResult,
+         makeEvaluator: (@Sendable (_ policy: DisplayPolicy) -> @Sendable (_ text: String) -> MaskingResult)? = nil) {
+        self.evaluate = evaluate
+        self.makeEvaluator = makeEvaluator ?? { _ in evaluate }
+    }
 }
 
 extension MaskingService {
@@ -36,20 +47,25 @@ extension MaskingService {
     static let identity = MaskingService { MaskingResult(isSecret: false, display: $0) }
 
     /// Live value backed by the Rust core. The entropy thresholds come from the core's
-    /// `defaultConfig()` (resolved once); `enabled`/`style` are read from settings per call so a
-    /// Privacy-pane toggle takes effect on the next menu open without re-instantiating anything.
+    /// `defaultConfig()` (resolved once). `makeEvaluator` freezes one policy for a whole request;
+    /// the per-call `evaluate` path resolves the current settings each time, so a Privacy-pane
+    /// toggle still takes effect on the next open without re-instantiating anything.
     static let live: MaskingService = {
         let base = defaultConfig()
-        return MaskingService { text in
-            guard !text.isEmpty else { return MaskingResult(isSecret: false, display: text) }
+        let makeEvaluator: @Sendable (DisplayPolicy) -> @Sendable (String) -> MaskingResult = { policy in
             var config = base
-            let settings = AppSettings()
-            config.enabled = settings.maskSecretsInMenu
-            config.style = maskStyle(from: settings.maskStyleRaw)
-            let secret = isSecret(text: text, config: config)
-            let display = mask(text: text, config: config)
-            return MaskingResult(isSecret: secret, display: display)
+            config.enabled = policy.maskEnabled
+            config.style = maskStyle(from: policy.maskStyleRaw)
+            return { [config] text in
+                guard !text.isEmpty else { return MaskingResult(isSecret: false, display: text) }
+                let secret = isSecret(text: text, config: config)
+                let display = mask(text: text, config: config)
+                return MaskingResult(isSecret: secret, display: display)
+            }
         }
+        return MaskingService(
+            evaluate: { text in makeEvaluator(DisplayPolicy.current())(text) },
+            makeEvaluator: makeEvaluator)
     }()
 
     /// Maps the persisted style string to the core enum. Unknown values fall back to the

@@ -88,15 +88,19 @@ import Testing
         })
     }
 
-    @Test func negativeMaxHistorySizeYieldsEmptyWithoutOverfetch() throws {
-        // A negative cap must clamp to LIMIT 0 (empty), not LIMIT -1 (fetch + decrypt everything).
+    @Test func negativeMaxHistorySizeClampsWithoutOverfetch() throws {
+        // A stored negative cap must NEVER become LIMIT -1 (fetch + decrypt everything). Since
+        // M-UI.11 P1, AppSettings normalizes the read into 1...100_000 — the same clamp the
+        // Settings UI applies on write — so garbage clamps to the floor of 1, not to empty.
         let defaults = freshDefaults { $0.set(-1, forKey: DefaultsKeys.maxHistorySize) }
         try run(defaults: defaults, seed: { repo in
             for i in 0..<3 {
                 try repo.add(try sealedClip(title: "c\(i)", createdAt: Make.epoch.addingTimeInterval(Double(i))))
             }
         }, body: { model in
-            #expect(model.history().isEmpty)
+            let rows = model.history()
+            #expect(rows.count == SettingsMapping.minHistorySize)
+            #expect(rows.map(\.title) == ["c2"]) // still the newest row, still bounded
         })
     }
 

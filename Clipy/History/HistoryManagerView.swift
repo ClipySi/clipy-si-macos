@@ -288,10 +288,13 @@ struct HistoryManagerView: View {
     }
 
     /// Decrypts the loaded window into rows and refreshes the derived filter option lists. Reconciles
-    /// the active Type/App filters against what's still present, then re-applies the query.
+    /// the active Type/App filters against what's still present, then re-applies the query. The mask
+    /// policy is resolved ONCE for the whole window (M-UI.11 P1), not once per row.
     private func rebuildRows() {
-        allRows = clips.prefix(historyWindowLimit).map { clip in
-            HistoryClipRow(clip: clip, display: displayBuilder.display(of: clip))
+        let window = Array(clips.prefix(historyWindowLimit))
+        let displays = displayBuilder.displays(of: window, policy: .current())
+        allRows = zip(window, displays).map { clip, display in
+            HistoryClipRow(clip: clip, display: display)
         }
         availableTypes = Set(allRows.map(\.typeDisplay)).sorted()
         availableApps = Set(allRows.map(\.sourceBundleDisplay).filter { !$0.isEmpty }).sorted()

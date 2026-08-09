@@ -24,7 +24,12 @@ struct AppSettings {
 
     // MARK: - Capture / dedupe
 
-    var maxHistorySize: Int { defaults.integer(forKey: DefaultsKeys.maxHistorySize) }
+    /// History cap, clamped 1...100_000 on read (M-UI.11 P1) — the same normalization the
+    /// GeneralPane and import-overflow writes apply, so a legacy/hand-edited defaults value can
+    /// neither disable trimming (0/negative) nor blow up display fetches (huge).
+    var maxHistorySize: Int {
+        SettingsMapping.clampMaxHistorySize(defaults.integer(forKey: DefaultsKeys.maxHistorySize))
+    }
     var copySameHistory: Bool { defaults.bool(forKey: DefaultsKeys.copySameHistory) }
     var overwriteSameHistory: Bool { defaults.bool(forKey: DefaultsKeys.overwriteSameHistory) }
 
