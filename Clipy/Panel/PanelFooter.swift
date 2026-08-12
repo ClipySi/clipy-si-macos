@@ -12,6 +12,13 @@ import SwiftUI
 struct PanelFooter: View {
     let pageCount: Int
     let currentPage: Int
+    /// The progressive scan is filling the current narrowing (M-UI.11 P4): the pager yields to
+    /// a progress readout — no final page count exists to promise (§4.6).
+    var isScanning = false
+    /// (processed, total) while known; nil renders indeterminate (no update stamped yet).
+    var scanProgress: (processed: Int, total: Int)?
+    /// Matches so far — the "known result count" shown beside the scan progress (§4.6).
+    var resultCount = 0
     /// Whether the side preview pane is shown — drives the toggle's icon/tooltip (the
     /// pane is fully hidden when off, so this footer button is the persistent mouse affordance).
     var isPreviewShown = false
@@ -24,7 +31,9 @@ struct PanelFooter: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            if pageCount > 1 {
+            if isScanning {
+                scanIndicator
+            } else if pageCount > 1 {
                 chevron("chevron.left", enabled: currentPage > 0, action: onPrev)
                 Text(verbatim: "\(currentPage + 1) / \(pageCount)")
                     .font(.caption.monospacedDigit())
@@ -41,6 +50,24 @@ struct PanelFooter: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 7)
         .overlay(Divider(), alignment: .top)
+    }
+
+    /// The scan readout (M-UI.11 P4): a thin determinate bar over (processed, total) — or an
+    /// indeterminate spinner before the first stamped update — plus the match count so far.
+    /// Counts of MATCHES only; never query text (§3.2).
+    @ViewBuilder private var scanIndicator: some View {
+        if let scanProgress, scanProgress.total > 0 {
+            ProgressView(value: Double(min(scanProgress.processed, scanProgress.total)),
+                         total: Double(scanProgress.total))
+                .controlSize(.small)
+                .frame(width: 72)
+        } else {
+            ProgressView()
+                .controlSize(.mini)
+        }
+        Text(verbatim: "\(resultCount)")
+            .font(.caption.monospacedDigit())
+            .foregroundStyle(.secondary)
     }
 
     /// The preview show/hide toggle: a side-half panel glyph matching the pane's side, prominent

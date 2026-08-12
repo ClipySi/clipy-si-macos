@@ -280,16 +280,20 @@ import Testing
                     pageRows = result?.rows.count ?? 0
                 }
                 #expect(pageRows == 10)
-                var windowSamples: [Duration] = []
-                var windowRows = 0
+                var scanSamples: [Duration] = []
+                var scanRows = 0
+                let scanRequest = HistoryReadService.ScanRequest(base: request, query: "",
+                                                                 category: .all, needsCounts: false)
                 for _ in 0..<(size >= 5_000 ? 3 : 5) {
-                    windowSamples.append(await clock.measure {
-                        windowRows = await service.fullWindow(request).rows.count
+                    scanSamples.append(await clock.measure {
+                        for await update in service.scanWindow(scanRequest) where update.complete {
+                            scanRows = update.matches.count
+                        }
                     })
                 }
-                #expect(windowRows == corpus.liveCount)
+                #expect(scanRows == corpus.liveCount)
                 report("serviceOpenPage", size: size, rows: pageRows, openSamples)
-                report("serviceFullWindow", size: size, rows: windowRows, windowSamples)
+                report("serviceScanWindow", size: size, rows: scanRows, scanSamples)
             }
         }
     }

@@ -166,17 +166,13 @@ import Testing
 
     // MARK: - Append integrity (post-review)
 
-    @Test func lateAppendAfterHydrationIsIgnored() {
+    @Test func lateAppendOntoACompleteWindowIsIgnored() {
         let model = HistoryPanelModel()
-        model.onNeedsWindowHydration = { }
         model.beginLoading(snippetRows: [])
-        model.commitFirstPage(historyRows: clipRows(0..<10), totalCount: 40, windowComplete: false)
-        model.searchText = "row"
-        model.searchTextDidChange()
-        model.completeWindow(clipRows(0..<40), totalCount: 40)
+        model.commitFirstPage(historyRows: clipRows(0..<40), totalCount: 40, windowComplete: true)
 
-        // A page fetch that raced the hydration must not append onto the finished window —
-        // that would duplicate rows and flip the window back to prefix bookkeeping (review).
+        // A page fetch that raced the window's completion must not append onto it — that would
+        // duplicate rows and flip the window back to prefix bookkeeping (review).
         model.appendHistoryPage(clipRows(100..<110), windowComplete: false)
         #expect(model.historyRows.count == 40)
         #expect(model.historyWindowComplete)
@@ -196,58 +192,82 @@ import Testing
         #expect(uniqueRowCount == 19)
     }
 
-    // MARK: - Narrowing / hydration
+    // MARK: - Narrowing / progressive scan (M-UI.11 P4)
 
-    @Test func narrowingOverAPrefixHydratesBeforeShowingResults() {
+    @Test func narrowingOverAPrefixStreamsScanResults() {
         let model = HistoryPanelModel()
-        var hydrationRequests = 0
-        model.onNeedsWindowHydration = { hydrationRequests += 1 }
+        var scanRequests = 0
+        model.onNeedsWindowScan = { scanRequests += 1 }
         model.beginLoading(snippetRows: [])
         model.commitFirstPage(historyRows: clipRows(0..<10, prefix: "note"),
                               totalCount: 40, windowComplete: false)
 
         model.searchText = "note 3"
         model.searchTextDidChange()
-        // Partial matches over a prefix must never pose as results (§3.1): scanning state, no
-        // no-results state, and a hydration request instead.
-        #expect(model.isHydratingWindow)
-        let hydrationHoldsResults = model.filteredRows.isEmpty
-        #expect(hydrationHoldsResults)
+        // Before the first update: scanning state, no untruthful empty state, a scan request.
+        #expect(model.isScanningHistory)
+        let preScanResults = model.filteredRows.isEmpty
+        #expect(preScanResults)
         #expect(model.emptyState == .none)
-        #expect(hydrationRequests >= 1)
+        #expect(scanRequests >= 1)
 
-        // The reply preserves the narrowing inputs and applies them to the full window:
-        // "note 3" matches "note 3" and "note 30"..."note 39".
-        model.completeWindow(clipRows(0..<40, prefix: "note"), totalCount: 40)
-        #expect(!model.isHydratingWindow)
+        // Partial matches render LIVE (still scanning — no exact totals promised).
+        let context = model.currentScanContext
+        let partial = [clipRows(3..<4, prefix: "note 3 partial")[0]]
+        model.applyScanUpdate(HistoryReadService.ScanUpdate(
+            matches: partial, processed: 20, total: 40, counts: nil,
+            complete: false, failed: false), context: context)
+        #expect(model.filteredRows.count == 1)
+        #expect(model.isScanningHistory)
+        let progressKnown = model.visibleScanProgress != nil
+        #expect(progressKnown)
+
+        // Completion settles the result set: "note 3" matches "note 3" and "note 30"…"note 39".
+        let matches = clipRows(0..<40, prefix: "note").filter { $0.title.contains("note 3") }
+        model.applyScanUpdate(HistoryReadService.ScanUpdate(
+            matches: matches, processed: 40, total: 40, counts: nil,
+            complete: true, failed: false), context: context)
+        #expect(!model.isScanningHistory)
         #expect(model.searchText == "note 3")
         #expect(model.filteredRows.count == 11)
         #expect(model.emptyState == .none)
+        // The prefix underneath was never touched — clearing the search returns to it.
+        #expect(model.historyRows.count == 10)
     }
 
-    @Test func chipCountsOverAPrefixStayHiddenUntilHydration() {
+    @Test func chipCountsOverAPrefixStayHiddenUntilTheScanCompletes() {
         let model = HistoryPanelModel()
-        var hydrationRequests = 0
-        model.onNeedsWindowHydration = { hydrationRequests += 1 }
+        var scanRequests = 0
+        model.onNeedsWindowScan = { scanRequests += 1 }
         model.beginLoading(snippetRows: [])
         model.commitFirstPage(historyRows: clipRows(0..<10), totalCount: 40, windowComplete: false)
 
         model.isFilterBarOpen = true
         // A prefix has no exact counts to offer — the chips render without badges (§3.1).
-        #expect(model.isHydratingWindow)
+        #expect(model.isScanningHistory)
         let chipsHaveNoCounts = model.categoryCounts.isEmpty
         #expect(chipsHaveNoCounts)
-        #expect(hydrationRequests >= 1)
+        #expect(scanRequests >= 1)
 
-        model.completeWindow(clipRows(0..<40), totalCount: 40)
-        #expect(!model.isHydratingWindow)
+        // Mid-scan counts never surface (§3.1) …
+        let context = model.currentScanContext
+        model.applyScanUpdate(HistoryReadService.ScanUpdate(
+            matches: clipRows(0..<20), processed: 20, total: 40, counts: nil,
+            complete: false, failed: false), context: context)
+        let midScanCounts = model.categoryCounts.isEmpty
+        #expect(midScanCounts)
+        // … exact ones do, with the final update.
+        model.applyScanUpdate(HistoryReadService.ScanUpdate(
+            matches: clipRows(0..<40), processed: 40, total: 40, counts: [.text: 40],
+            complete: true, failed: false), context: context)
+        #expect(!model.isScanningHistory)
         #expect(model.categoryCounts[.text] == 40)
     }
 
-    @Test func snippetsScopeSearchDoesNotHydrate() {
+    @Test func snippetsScopeSearchDoesNotScan() {
         let model = HistoryPanelModel()
-        var hydrationRequests = 0
-        model.onNeedsWindowHydration = { hydrationRequests += 1 }
+        var scanRequests = 0
+        model.onNeedsWindowScan = { scanRequests += 1 }
         model.beginLoading(snippetRows: snippetRows(count: 3))
         model.commitFirstPage(historyRows: clipRows(0..<10), totalCount: 40, windowComplete: false)
 
@@ -256,31 +276,93 @@ import Testing
         model.setScope(.snippets)
         model.searchText = "snippet 1"
         model.searchTextDidChange()
-        #expect(!model.isHydratingWindow)
-        #expect(hydrationRequests == 0)
+        #expect(!model.isScanningHistory)
+        #expect(scanRequests == 0)
         let hasSnippetMatches = !model.filteredRows.isEmpty
         #expect(hasSnippetMatches)
 
-        // Back in a history-bearing scope the same query DOES need the window.
+        // Back in a history-bearing scope the same query DOES need the scan.
         model.setScope(.all)
-        #expect(model.isHydratingWindow)
-        #expect(hydrationRequests == 1)
+        #expect(model.isScanningHistory)
+        #expect(scanRequests == 1)
     }
 
-    @Test func completeWindowKeepsASurvivingSelection() {
+    @Test func aLateScanUpdateAfterClearingTheNarrowingIsRefused() {
         let model = HistoryPanelModel()
-        model.onNeedsWindowHydration = { }
+        model.onNeedsWindowScan = { }
         model.beginLoading(snippetRows: [])
         let page0 = clipRows(0..<10)
         model.commitFirstPage(historyRows: page0, totalCount: 40, windowComplete: false)
         model.selectNext() // the user moved the highlight off the top row
 
-        model.isFilterBarOpen = true // hydration starts (blank list; selection value survives)
-        model.closeFilterBar()       // …and the user clears the narrowing before it lands
-        // The late completeWindow must not stomp a highlight that still resolves (review).
-        model.completeWindow(page0 + clipRows(10..<40), totalCount: 40)
+        model.isFilterBarOpen = true // the scan is requested
+        let context = model.currentScanContext
+        model.closeFilterBar()       // …and the user clears the narrowing before it reports
+        // The late update must be refused — nothing may disturb the restored prefix view.
+        let accepted = model.applyScanUpdate(HistoryReadService.ScanUpdate(
+            matches: clipRows(10..<40), processed: 40, total: 40, counts: nil,
+            complete: true, failed: false), context: context)
+        #expect(!accepted)
         let selectionSurvived = model.selection == page0[1].id
         #expect(selectionSurvived)
+        #expect(model.historyRows.count == 10)
+    }
+
+    @Test func aLandingAppendNeverCompletesAParkedMoveUnderANarrowing() {
+        let model = HistoryPanelModel()
+        var moreRequests = 0
+        model.onNeedsMoreHistory = { moreRequests += 1 }
+        model.onNeedsWindowScan = { }
+        model.beginLoading(snippetRows: [])
+        model.commitFirstPage(historyRows: clipRows(0..<10), totalCount: 40, windowComplete: false)
+        model.nextPage() // parks pendingPage = 1, fires the fetch
+        #expect(moreRequests == 1)
+
+        // ⌘F begins a narrowing while the fetch is in flight — the parked move now belongs to
+        // a dead context (review: completing it would jump the narrowed match list).
+        model.isFilterBarOpen = true
+        model.appendHistoryPage(clipRows(10..<20), windowComplete: false)
+        #expect(model.currentPage == 0)
+        let parkCleared = model.pendingPage == nil
+        #expect(parkCleared)
+    }
+
+    @Test func settledAllScopeCountsIncludeTheSnippetTail() {
+        let model = HistoryPanelModel()
+        model.onNeedsWindowScan = { }
+        model.beginLoading(snippetRows: snippetRows(count: 3))
+        model.commitFirstPage(historyRows: clipRows(0..<10), totalCount: 40, windowComplete: false)
+        model.isFilterBarOpen = true
+
+        // The scan counts history clips only; the .all badge must still count the snippet
+        // items it lists, exactly as the complete-window path does (review).
+        model.applyScanUpdate(HistoryReadService.ScanUpdate(
+            matches: clipRows(0..<40), processed: 40, total: 40,
+            counts: [.all: 40, .text: 40], complete: true, failed: false),
+            context: model.currentScanContext)
+        #expect(model.categoryCounts[.all] == 43)
+        #expect(model.categoryCounts[.text] == 40)
+        #expect(model.filteredRows.count == 44) // 40 clips + header + 3 snippets
+    }
+
+    @Test func settleScanAsFailedUnfreezesAScanningDisplay() {
+        let model = HistoryPanelModel()
+        model.onNeedsWindowScan = { }
+        model.beginLoading(snippetRows: [])
+        model.commitFirstPage(historyRows: clipRows(0..<10), totalCount: 300, windowComplete: false)
+        model.searchText = "row"
+        model.searchTextDidChange()
+        model.applyScanUpdate(HistoryReadService.ScanUpdate(
+            matches: clipRows(0..<5), processed: 128, total: 300,
+            counts: nil, complete: false, failed: false),
+            context: model.currentScanContext)
+        #expect(model.isScanningHistory)
+
+        // The silent re-scan died mid-stream (review): the display settles with what it has —
+        // no frozen progress bar with no retry path.
+        model.settleScanAsFailed()
+        #expect(!model.isScanningHistory)
+        #expect(model.filteredRows.count == 5)
     }
 
     // MARK: - Legacy reset

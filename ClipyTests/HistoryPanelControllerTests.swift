@@ -99,7 +99,7 @@ import Testing
         }
     }
 
-    @Test func hideDropsALateHydration() async throws {
+    @Test func hideDropsALateScan() async throws {
         let corpus = try PerfFixture.makeCorpus(liveCount: 47)
         try await withDependencies {
             $0.defaultDatabase = corpus.database
@@ -112,13 +112,15 @@ import Testing
             let pageSize = controller.model.itemsPerPage
 
             controller.model.searchText = "note"
-            controller.model.searchTextDidChange() // hydration starts
-            let lateHydration = controller.hydrationTask
+            controller.model.searchTextDidChange() // the progressive scan starts
+            let lateScan = controller.scanTask
             controller.hide()
-            await lateHydration?.value
-            // The generation guard dropped completeWindow — the prefix stayed a prefix.
+            await lateScan?.value
+            // The generation guard dropped every update — prefix untouched, nothing committed.
             #expect(controller.model.historyRows.count == pageSize)
             #expect(!controller.model.historyWindowComplete)
+            let matchesCommitted = !controller.model.scanMatches.isEmpty
+            #expect(!matchesCommitted)
         }
     }
 
@@ -146,7 +148,7 @@ import Testing
         }
     }
 
-    @Test func searchHydratesTheCompleteWindowAndKeepsTheQuery() async throws {
+    @Test func searchScansProgressivelyAndKeepsTheQuery() async throws {
         let corpus = try PerfFixture.makeCorpus(liveCount: 47)
         try await withDependencies {
             $0.defaultDatabase = corpus.database
@@ -160,16 +162,75 @@ import Testing
 
             controller.model.searchText = "note"
             controller.model.searchTextDidChange()
-            #expect(controller.model.isHydratingWindow)
-            await controller.hydrationTask?.value
-            #expect(!controller.model.isHydratingWindow)
-            #expect(controller.model.historyWindowComplete)
-            // The whole capped window backs the search now (47 live rows, cap 100), and the
-            // fixture's prose titles ("note N: …") produce matches.
-            #expect(controller.model.historyRows.count == 47)
+            #expect(controller.model.isScanningHistory)
+            await controller.scanTask?.value
+            #expect(!controller.model.isScanningHistory)
+            // P4: the scan serves the matches BESIDE the prefix — the window is never
+            // materialized wholesale, and the loaded prefix survives for when the search clears.
+            #expect(controller.model.historyRows.count == controller.model.itemsPerPage)
+            #expect(!controller.model.historyWindowComplete)
             #expect(controller.model.searchText == "note")
             let searchHasMatches = !controller.model.filteredRows.isEmpty
             #expect(searchHasMatches)
+        }
+    }
+
+    @Test func aReopenedPanelNeverServesThePreviousOpensScan() async throws {
+        let corpus = try PerfFixture.makeCorpus(liveCount: 47)
+        try await withDependencies {
+            $0.defaultDatabase = corpus.database
+            $0.historyCipher = PerfFixture.cipher
+            $0.maskingService = .identity
+        } operation: {
+            let controller = makeController()
+            defer { controller.hide() }
+            controller.open()
+            await controller.openTask?.value
+            controller.model.searchText = "note"
+            controller.model.searchTextDidChange()
+            await controller.scanTask?.value
+            let firstOpenMatches = controller.model.filteredRows.count
+            #expect(firstOpenMatches > 0)
+            controller.hide()
+
+            // Re-open and retype the SAME query: the previous open's stamp and request record
+            // must not present its stale matches as settled, nor suppress the fresh scan
+            // (review: both survived a hide before this fix).
+            controller.open()
+            await controller.openTask?.value
+            controller.model.searchText = "note"
+            controller.model.searchTextDidChange()
+            let freshScanStarted = controller.scanTask != nil
+            #expect(freshScanStarted)
+            await controller.scanTask?.value
+            #expect(!controller.model.isScanningHistory)
+            #expect(controller.model.filteredRows.count == firstOpenMatches)
+        }
+    }
+
+    @Test func aWhitespaceQueryEditNeverRestartsASettledScan() async throws {
+        let corpus = try PerfFixture.makeCorpus(liveCount: 47)
+        try await withDependencies {
+            $0.defaultDatabase = corpus.database
+            $0.historyCipher = PerfFixture.cipher
+            $0.maskingService = .identity
+        } operation: {
+            let controller = makeController()
+            defer { controller.hide() }
+            controller.open()
+            await controller.openTask?.value
+            controller.model.searchText = "note"
+            controller.model.searchTextDidChange()
+            await controller.scanTask?.value
+            #expect(!controller.model.isScanningHistory)
+
+            // "note " normalizes to "note": the settled result set stands — no new walk, no
+            // flicker back into the scanning presentation (review).
+            controller.model.searchText = "note "
+            controller.model.searchTextDidChange()
+            let restarted = controller.scanTask != nil || controller.scanDebounceTask != nil
+            #expect(!restarted)
+            #expect(!controller.model.isScanningHistory)
         }
     }
 }

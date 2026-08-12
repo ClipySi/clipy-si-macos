@@ -116,11 +116,16 @@ import Testing
             // decrypt-failed ghosts (their titleCipher is wiped) or inflate the counts.
             let ghostRows = walked.count(where: \.decryptFailed)
             #expect(ghostRows == 0)
-            // The walk and the full-window read must agree row for row — same total order
-            // (`(createdAt, id)`), or search hydration would reshuffle visible rows.
-            let windowIDs = await service.fullWindow(request).rows.map(\.id)
-            let walkMatchesWindowOrder = walked.map(\.id) == windowIDs
-            #expect(walkMatchesWindowOrder)
+            // The walk and an unfiltered scan must agree row for row — same total order
+            // (`(createdAt, id)`), or the scan's matches would reshuffle against the pages.
+            var scanIDs: [RowID] = []
+            let scanRequest = HistoryReadService.ScanRequest(base: request, query: "",
+                                                             category: .all, needsCounts: false)
+            for await update in service.scanWindow(scanRequest) where update.complete {
+                scanIDs = update.matches.map(\.id)
+            }
+            let walkMatchesScanOrder = walked.map(\.id) == scanIDs
+            #expect(walkMatchesScanOrder)
         }
     }
 

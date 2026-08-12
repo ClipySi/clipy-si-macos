@@ -6,9 +6,9 @@
 //  then asks this actor for the first keyset page — DB fetch, AES-GCM decrypt, and mask
 //  evaluation all run on the actor's executor, and the controller commits the result to the
 //  model in ONE generation-guarded MainActor snapshot (a hide/re-show drops late results).
-//  Sequential page moves continue from the returned cursor. The search/category/chip-counts
-//  path still reads the whole capped window (the P2 interim — P4 replaces it with a
-//  cancellable progressive scan), but off the MainActor too.
+//  Sequential page moves continue from the returned cursor. Search, title-dependent
+//  categories, and chip counts run as a cancellable progressive scan
+//  (HistoryReadService+Scan.swift — M-UI.11 P4).
 //
 //  Isolation: everything here is Sendable value types — `ClipRepository`,
 //  `ClipDisplayBuilder`, and the ciphers/maskers they hold are non-isolated structs, and
@@ -62,10 +62,16 @@ actor HistoryReadService {
         var failed = false
     }
 
-    private let clips = ClipRepository()
-    private let displayBuilder = ClipDisplayBuilder()
+    // Internal (not private) ONLY for the scan extension split (HistoryReadService+Scan.swift)
+    // — treat as private to these two files.
+    let clips = ClipRepository()
+    let displayBuilder = ClipDisplayBuilder()
+    /// The scan's classifier memo (M-UI.11 P4) — the same core the MainActor tier uses
+    /// (`PanelClassificationCache`), instanced here because verdicts must resolve on THIS
+    /// executor. Sized so one capped window's classifiable rows fit without thrashing.
+    var scanVerdicts = CodeVerdictMemo(capacity: 32_768)
 
-    private static let log = Logger(subsystem: "io.github.ponponusa.clipysi", category: "history-read")
+    static let log = Logger(subsystem: "io.github.ponponusa.clipysi", category: "history-read")
 
     /// The first page of an open, plus the window total the model's paging math needs.
     func openPage(_ request: PageRequest) -> PageResult {
@@ -96,30 +102,15 @@ actor HistoryReadService {
                       total: total, request: request)
     }
 
-    /// The whole capped window — the interim basis for search, category filters, and chip
-    /// counts (P4 replaces this with a progressive scan; P2 only moves it off the MainActor).
-    /// Cost equals the pre-P2 open (`recentClips` + decrypt + mask), paid only when the user
-    /// actually narrows.
-    func fullWindow(_ request: PageRequest) -> PageResult {
-        do {
-            let clipRows = try PanelSignpost.measureCounted(.historyFetch) {
-                try clips.recentClips(limit: request.historyLimit, ascending: request.ascending)
-            }
-            let rows = buildRows(clipRows, policy: request.policy)
-            return PageResult(rows: rows, nextCursor: nil, totalCount: rows.count)
-        } catch {
-            Self.log.error("history window read failed: \(error.localizedDescription, privacy: .public)")
-            return PageResult(rows: [], nextCursor: nil, totalCount: 0, failed: true)
-        }
-    }
-
     // MARK: - Private
 
     /// A DB failure degrades to an empty page (logged), mirroring `MenuModel.history` — the
     /// panel shows its empty state rather than throwing into the open pipeline. The result is
     /// flagged `failed` so the reconcile paths can refuse to commit it (see PageResult).
-    private func page(after cursor: ClipPageCursor?, loadedCount: Int, budget: Int,
-                      _ request: PageRequest) -> PageResult {
+    /// Internal only for the scan extension split — the scan walks the window through THIS
+    /// one keyset/cap/total contract (P4 review: a second hand-written walk drifted).
+    func page(after cursor: ClipPageCursor?, loadedCount: Int, budget: Int,
+              _ request: PageRequest) -> PageResult {
         do {
             let budget = max(0, min(budget, request.historyLimit - loadedCount))
             guard budget > 0 else {
@@ -171,7 +162,8 @@ actor HistoryReadService {
         return PageResult(rows: rows, nextCursor: nextCursor, totalCount: total)
     }
 
-    private func buildRows(_ clipRows: [Clip], policy: DisplayPolicy) -> [PanelRow] {
+    /// Internal only for the scan extension split.
+    func buildRows(_ clipRows: [Clip], policy: DisplayPolicy) -> [PanelRow] {
         PanelSignpost.measure(.historyDecryptMask, rows: clipRows.count) {
             displayBuilder.displays(of: clipRows, policy: policy).map(PanelRowBuilder.historyRow(for:))
         }

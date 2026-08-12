@@ -96,7 +96,7 @@ import Testing
         }
     }
 
-    @Test func reconcileWhileNarrowingReHydratesTheWindow() async throws {
+    @Test func reconcileWhileNarrowingRestartsTheScan() async throws {
         let corpus = try PerfFixture.makeCorpus(liveCount: 47)
         try await withDependencies {
             $0.defaultDatabase = corpus.database
@@ -108,27 +108,26 @@ import Testing
             defer { controller.hide() }
             controller.open()
             await controller.openTask?.value
-            controller.model.searchText = "e" // narrows → hydrates the full window (P2 interim)
-            await controller.hydrationTask?.value
-            #expect(controller.model.historyWindowComplete)
+            controller.model.searchText = "e" // narrows → the progressive scan serves it (P4)
+            await controller.scanTask?.value
+            #expect(!controller.model.isScanningHistory)
 
-            guard case let .clip(deletedID) = controller.model.historyRows[0].id else {
-                Issue.record("history rows must be clip rows")
+            guard case let .clip(deletedID) = controller.model.filteredRows[0].id else {
+                Issue.record("scan matches must be clip rows")
                 return
             }
             _ = try ClipRepository().delete(id: deletedID, soft: true)
 
             controller.reconcileFromObservation()
-            // A narrowed panel must re-hydrate (filtered rows need COMPLETE data), never
-            // prefix-commit over its window.
-            let usedHydration = controller.hydrationTask != nil
-            #expect(usedHydration)
-            let usedPrefixPath = controller.reconcileTask != nil
-            #expect(!usedPrefixPath)
-            await controller.hydrationTask?.value
+            // A narrowed prefix panel RE-SCANS (its matches need fresh window data); the
+            // parallel prefix refresh must never commit over the scan's result set — the
+            // matches stay scan-owned while the prefix re-bases underneath.
+            let usedScan = controller.scanTask != nil
+            #expect(usedScan)
+            await controller.reconcileTask?.value
+            await controller.scanTask?.value
             #expect(controller.model.historyCount == 46)
-            #expect(controller.model.historyWindowComplete)
-            let deletedStillListed = controller.model.historyRows.contains { $0.id == .clip(deletedID) }
+            let deletedStillListed = controller.model.filteredRows.contains { $0.id == .clip(deletedID) }
             #expect(!deletedStillListed)
         }
     }
@@ -173,7 +172,7 @@ import Testing
             controller.hide()
 
             controller.reconcileFromObservation()
-            let spawnedWork = controller.reconcileTask != nil || controller.hydrationTask != nil
+            let spawnedWork = controller.reconcileTask != nil || controller.scanTask != nil
             #expect(!spawnedWork)
         }
     }
@@ -206,7 +205,7 @@ import Testing
         }
     }
 
-    @Test func aFailedReHydrationKeepsTheNarrowedRows() async throws {
+    @Test func aFailedSilentRescanKeepsTheMatches() async throws {
         let corpus = try PerfFixture.makeCorpus(liveCount: 47)
         try await withDependencies {
             $0.defaultDatabase = corpus.database
@@ -218,16 +217,16 @@ import Testing
             controller.open()
             await controller.openTask?.value
             controller.model.searchText = "e"
-            await controller.hydrationTask?.value
-            let hydratedRows = controller.model.historyRows.count
-            #expect(hydratedRows == 47)
+            await controller.scanTask?.value
+            let matchesBefore = controller.model.filteredRows.count
+            #expect(matchesBefore > 0)
 
             try corpus.database.close()
             controller.reconcileFromObservation()
-            await controller.hydrationTask?.value
-            // The failed re-read was discarded — the user's narrowed window stands.
-            #expect(controller.model.historyRows.count == hydratedRows)
-            #expect(controller.model.historyWindowComplete)
+            await controller.scanTask?.value
+            // The failed silent re-scan was discarded — the matches on screen stand.
+            #expect(controller.model.filteredRows.count == matchesBefore)
+            #expect(!controller.model.isScanningHistory)
         }
     }
 
@@ -299,18 +298,60 @@ import Testing
         #expect(model.currentPage == 0)
     }
 
+    @Test func reconcileUnderANarrowingAlsoRefreshesThePrefix() async throws {
+        let corpus = try PerfFixture.makeCorpus(liveCount: 47)
+        try await withDependencies {
+            $0.defaultDatabase = corpus.database
+            $0.historyCipher = PerfFixture.cipher
+            $0.maskingService = .identity
+            $0.date = .constant(Make.epoch) // soft delete stamps deletedAt/updatedAt
+        } operation: {
+            let (controller, _) = makeContext()
+            defer { controller.hide() }
+            controller.open()
+            await controller.openTask?.value
+            controller.model.searchText = "e"
+            await controller.scanTask?.value
+
+            // Delete a row that sits in the LOADED PREFIX (not just the match set): clearing
+            // the search must not resurface it (review — the P3 exit rule, regressed when the
+            // whole-window swap was removed).
+            guard case let .clip(deletedID) = controller.model.historyRows[0].id else {
+                Issue.record("history rows must be clip rows")
+                return
+            }
+            _ = try ClipRepository().delete(id: deletedID, soft: true)
+
+            controller.reconcileFromObservation()
+            await controller.reconcileTask?.value
+            await controller.scanTask?.value
+            let prefixStillHoldsDeleted = controller.model.historyRows.contains { $0.id == .clip(deletedID) }
+            #expect(!prefixStillHoldsDeleted)
+
+            controller.model.searchText = ""
+            controller.model.searchTextDidChange()
+            let listedAfterClearing = controller.model.filteredRows.contains { $0.id == .clip(deletedID) }
+            #expect(!listedAfterClearing)
+            #expect(controller.model.historyCount == 46)
+        }
+    }
+
     // MARK: - Model guard (defense in depth with the controller's ordering guards)
 
-    @Test func reconcilePrefixIsIgnoredWhileANarrowingIsActive() {
+    @Test func reconcilePrefixIsIgnoredWhileAPrefixNarrowingIsActive() {
         let model = HistoryPanelModel()
-        let rows = (0..<20).map { PanelRow.clip(UUID(), title: "row \($0)") }
-        model.reset(historyRows: rows, snippetRows: [])
+        model.onNeedsWindowScan = { }
+        model.beginLoading(snippetRows: [])
+        let rows = (0..<10).map { PanelRow.clip(UUID(), title: "row \($0)") }
+        model.commitFirstPage(historyRows: rows, totalCount: 40, windowComplete: false)
         model.searchText = "row"
+        model.searchTextDidChange()
 
-        model.reconcilePrefix([], totalCount: 0, windowComplete: false)
-        // The narrowed window kept its rows: a prefix built without the search context must
-        // never replace it.
-        #expect(model.historyRows.count == 20)
-        #expect(model.historyWindowComplete)
+        // The scan owns a narrowed PREFIX window: a prefix commit without that context must
+        // never replace it. (A narrowed COMPLETE window accepts the commit — the rows ARE the
+        // whole window and the rebuild re-applies the narrowing in-memory; P4.)
+        model.reconcilePrefix([], totalCount: 0, windowComplete: true)
+        #expect(model.historyRows.count == 10)
+        #expect(!model.historyWindowComplete)
     }
 }

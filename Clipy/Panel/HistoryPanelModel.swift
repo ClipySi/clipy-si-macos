@@ -20,11 +20,17 @@
 //  A fresh open goes through `beginLoading` (shell up, list EMPTY, paste dead) and then
 //  `commitFirstPage` — after which the rows are a sequential PREFIX of the window and paging
 //  math runs on `historyWindowTotal`. Sequential page moves past the prefix park on
-//  `pendingPage` and ask the controller for more via `onNeedsMoreHistory`; narrowing inputs
-//  (search / category / chips) can't be answered from a prefix, so they hold a blank list and
-//  request the complete window via `onNeedsWindowHydration` (P2 interim — P4 replaces that with
-//  a progressive scan). Legacy `reset` still commits a complete window in one call (tests, and
-//  any caller that already has every row).
+//  `pendingPage` and ask the controller for more via `onNeedsMoreHistory`. Legacy `reset`
+//  still commits a complete window in one call (tests, and any caller that already has every
+//  row).
+//
+//  M-UI.11 P4 (progressive scan): narrowing inputs (search / category / chips) over a prefix
+//  window are served by the read service's batched scan — matches stream into `scanMatches`
+//  (independent of `historyRows`, so clearing the narrowing returns to the prefix, and a
+//  100k-row history never materializes wholesale — §12), stamped with the inputs they were
+//  filtered by; the rebuild shows only current-stamp matches, so a rapid query replacement can
+//  never flash the previous query's rows. Partial matches render live; exact counts and the
+//  snippet tail (.all scope, §4.6) join on completion.
 //
 
 import Foundation
@@ -56,7 +62,17 @@ final class HistoryPanelModel {
     var category: PanelCategory = .all { didSet { if oldValue != category { inputsDidChange() } } }
     /// Whether the category chips row under the search field is shown (the filter toggle button).
     /// Per-open reset, like scope/search. An input: chip counts are computed only while it is open.
-    var isFilterBarOpen = false { didSet { if oldValue != isFilterBarOpen { inputsDidChange() } } }
+    /// Opening it BEGINS a narrowing (the counts scan), so a parked page move — which belongs
+    /// to the un-narrowed context — is discarded here like every other narrowing entry (P4
+    /// review: a landing page fetch would otherwise jump the narrowed match list).
+    var isFilterBarOpen = false {
+        didSet {
+            if oldValue != isFilterBarOpen {
+                pendingPage = nil
+                inputsDidChange()
+            }
+        }
+    }
     /// The live search query. Matched against the masked clip `title` (C3) and the plaintext snippet
     /// title via `PanelSearch.filterCombined`. Empty ⇒ classic, unfiltered. The view two-way binds this.
     var searchText = "" { didSet { if oldValue != searchText { inputsDidChange() } } }
@@ -100,14 +116,15 @@ final class HistoryPanelModel {
     // split (HistoryPanelModel+Mutations.swift); nothing outside the model's own mutations may
     // write them.
 
-    /// True from `beginLoading` until `commitFirstPage`/`completeWindow`: the shell is up but the
+    /// True from `beginLoading` until `commitFirstPage`: the shell is up but the
     /// row set is indeterminate, so the derived tier stays EMPTY — nothing to select, number, or
     /// paste (§3.1: loading must not let Return/digits fire on unconfirmed rows). Mutated only
     /// inside the batch mutations, so it needs no didSet of its own.
     var isLoadingFirstRows = false
     /// False while `historyRows` is a sequential PREFIX of the capped live window (normal paged
-    /// browsing); true when it holds everything this open can show (legacy `reset`, a hydrated
-    /// window, or an exhausted walk). Narrowing requires a complete window.
+    /// browsing); true when it holds everything this open can show (legacy `reset`, a small
+    /// history, or an exhausted walk). Narrowing over a prefix runs the progressive scan;
+    /// over a complete window it filters in memory.
     var historyWindowComplete = true
     /// Live clips in the capped window (`min(live count, maxHistorySize)`) — the paging/badge
     /// total while the rows are a prefix. Meaningless (and unused) once `historyWindowComplete`;
@@ -117,14 +134,57 @@ final class HistoryPanelModel {
     /// Sequential paging wants rows beyond the loaded prefix: the controller fetches the next
     /// keyset page (from its cursor) and replies via `appendHistoryPage`. Fired from `goToPage`.
     @ObservationIgnored var onNeedsMoreHistory: (() -> Void)?
-    /// A narrowing input (search / category / chips) needs the COMPLETE capped window: the
-    /// controller fetches it off-main and replies via `completeWindow`. May fire repeatedly
-    /// while the need persists — the controller coalesces in-flight requests.
-    @ObservationIgnored var onNeedsWindowHydration: (() -> Void)?
+    /// A narrowing over a PREFIX window needs the progressive scan's results (M-UI.11 P4).
+    /// Fired on EVERY rebuild that needs them — the controller coalesces by comparing scan
+    /// requests, so repeated fires while one scan serves the same inputs are free.
+    @ObservationIgnored var onNeedsWindowScan: (() -> Void)?
     /// The page a blocked `goToPage` is waiting to land on (§5.3: the visible page holds until
     /// the rows exist — never a seam of misplaced rows). Applied by `appendHistoryPage`.
     /// Internal only for the mutation extension split — treat as private.
     @ObservationIgnored var pendingPage: Int?
+
+    // MARK: - Progressive scan (M-UI.11 P4)
+
+    /// What one scan's results were filtered by. Stamped onto `scanMatches` when the
+    /// controller commits an update; the rebuild SHOWS those matches only while the stamp
+    /// equals the current inputs — a rapid query replacement can therefore never render the
+    /// previous query's rows, even for one frame (§8.1 stale-result rule).
+    struct ScanContext: Equatable, Sendable {
+        let query: String
+        let category: PanelCategory
+        let needsCounts: Bool
+    }
+
+    /// The narrowing inputs the CURRENT rebuild filters by. Query identity normalizes through
+    /// `PanelSearch.normalize` — the ONE rule every stamp/request maker shares.
+    var currentScanContext: ScanContext {
+        ScanContext(query: PanelSearch.normalize(searchText),
+                    category: category, needsCounts: showsFilterBar)
+    }
+
+    // Scan results live OUTSIDE the derived tier (plain storage, no didSet): only
+    // `applyScanUpdate` writes them, batching its own rebuild. They are separate from
+    // `historyRows` — the prefix survives underneath, so clearing the narrowing returns to it
+    // without a re-fetch, and a 100k-row history never materializes wholesale (§12).
+    @ObservationIgnored var scanMatches: [PanelRow] = []
+    @ObservationIgnored var scanCounts: [PanelCategory: Int]?
+    @ObservationIgnored var scanContext: ScanContext?
+    /// Progress of the stamped scan: (processed, total) while scanning; nil once settled —
+    /// complete, or failed (a failed scan presents its partial matches as-is, with no counts
+    /// and no stuck progress; the controller refuses to re-run the same failed request).
+    @ObservationIgnored var scanProgress: (processed: Int, total: Int)?
+
+    /// Drop every scan artifact — results, counts, stamp, progress. Called when the narrowing
+    /// clears (dead weight; masked-off plaintext), on a fresh open (`beginLoading` — a stale
+    /// stamp must not render the previous open's results as settled: P4 review), and behind
+    /// the screen lock (`purgeHistoryRows`, D4). ONE helper — the reset sites must never
+    /// drift apart (a missed field is a D4 leak). Internal only for the mutation split.
+    func clearScanResults() {
+        scanMatches = []
+        scanCounts = nil
+        scanContext = nil
+        scanProgress = nil
+    }
 
     // MARK: - Derived snapshot
 
@@ -143,9 +203,12 @@ final class HistoryPanelModel {
         /// nil while the chips row is hidden — nothing on screen needs counts then; the
         /// `categoryCounts` forwarder computes on demand for off-screen callers (tests).
         var categoryCounts: [PanelCategory: Int]?
-        /// A narrowing input is waiting on the complete window (M-UI.11 P2): the list renders
-        /// blank — partial matches over a prefix must never pose as results (§3.1).
-        var isHydratingWindow = false
+        /// The progressive scan is filling this narrowing's results (M-UI.11 P4): partial
+        /// matches ARE shown as they arrive, but no exact totals — the footer swaps its pager
+        /// for progress, and the chip badges stay hidden (§3.1).
+        var isScanningHistory = false
+        /// (processed, total) for the footer's progress readout; nil once complete/failed.
+        var scanProgress: (processed: Int, total: Int)?
     }
 
     private(set) var derived = DerivedState()
@@ -195,16 +258,43 @@ final class HistoryPanelModel {
         }
         var next = DerivedState()
         next.snippetSelectableCount = snippetRows.count(where: \.isSelectable)
-        // A narrowing input over a PREFIX window can't produce trustworthy rows or counts —
-        // hold a blank list and ask for the complete window (P2 interim; P4: progressive scan).
-        // Callback last: it only spawns the controller's fetch task, never mutates the model
-        // synchronously.
+        // A narrowing over a PREFIX window is served by the progressive scan (M-UI.11 P4):
+        // matches stream in and are SHOWN as they arrive (window order — the first page
+        // settles early and stays stable), but only matches stamped with the CURRENT inputs;
+        // a query edit renders empty (+ scanning) until its own scan reports, never the
+        // previous query's rows. Counts surface only when exact (§3.1). §4.6: snippet matches
+        // join AFTER the history scan completes — the .all order (history first) never
+        // reshuffles mid-scan. Callback last: it only pokes the controller's coalescer.
         if isNarrowingHistory && !historyWindowComplete {
-            next.isHydratingWindow = true
+            let fresh = scanContext == currentScanContext
+            let complete = fresh && scanProgress == nil
+            next.filteredRows = fresh ? scanMatches : []
+            if complete {
+                let snippetTail = scope == .all
+                    ? PanelSearch.filterCombined(
+                        PanelFilter.filter(snippetRows, category: category), query: searchText)
+                    : []
+                next.filteredRows += snippetTail
+                if showsFilterBar {
+                    // Snippets carry no content kind but ARE items: the All badge counts them,
+                    // exactly as the complete-window path's PanelFilter.counts over scopedRows
+                    // does (P4 review — the two paths must promise the same numbers).
+                    var counts = scanCounts ?? [:]
+                    counts[.all, default: 0] += snippetTail.count(where: \.isSelectable)
+                    next.categoryCounts = counts
+                }
+            } else {
+                next.isScanningHistory = true
+                next.scanProgress = fresh ? scanProgress : nil
+            }
             derived = next
-            onNeedsWindowHydration?()
+            rebuildPageTier()
+            onNeedsWindowScan?()
             return
         }
+        // Narrowing cleared: drop the dead scan results now — with masking off they are
+        // display plaintext, and the stamp already guarantees they could never render again.
+        clearScanResults()
         let scoped = scopedRows
         // Verdicts are needed up front ONLY for a title-dependent category or the chip counts;
         // otherwise the page tier classifies just the visible slice.
@@ -225,13 +315,13 @@ final class HistoryPanelModel {
     /// The paging denominator: the loaded (filtered) rows once the window is complete; the
     /// scope's TOTAL rendered rows (capped live count + snippet rows incl. headers) while it is
     /// a prefix — the footer must show the real page count even though only the walked pages are
-    /// materialized. A history-bearing prefix is by construction un-narrowed (narrowing
-    /// hydrates first), so the filtered set equals the scoped set there. The snippets scope is
-    /// the exception: it never hydrates AND can be narrowed over a prefix window, so its
-    /// denominator is always the loaded (filtered) rows — the unfiltered total would page a
-    /// narrowed list into phantom pages (P3 review).
+    /// materialized. Narrowed states page over what is actually loaded: scan matches ARE the
+    /// result set (M-UI.11 P4 — the footer shows progress, not a final page count, while the
+    /// scan runs), and the snippets scope filters rows that are always complete — either way
+    /// the unfiltered total would page a narrowed list into phantom pages (P3 review).
     func effectiveRowCount(loaded: Int) -> Int {
         guard !historyWindowComplete else { return loaded }
+        if isNarrowingHistory { return loaded }
         switch scope {
         case .history: return historyWindowTotal
         case .all: return historyWindowTotal + snippetRows.count
@@ -277,8 +367,11 @@ final class HistoryPanelModel {
     var snippetCount: Int { derived.snippetSelectableCount }
     var allCount: Int { historyCount + snippetCount }
 
-    /// A narrowing input is waiting on the complete window (blank list, no counts) — P2 interim.
-    var isHydratingWindow: Bool { derived.isHydratingWindow }
+    /// The progressive scan is still filling the current narrowing's results (M-UI.11 P4):
+    /// partial matches are on screen, no exact totals yet.
+    var isScanningHistory: Bool { derived.isScanningHistory }
+    /// The footer's progress readout while scanning; nil otherwise.
+    var visibleScanProgress: (processed: Int, total: Int)? { derived.scanProgress }
 
     /// Nothing to show at all (no history and no snippets) — distinct from "no search results".
     var isEmpty: Bool { historyRows.isEmpty && snippetRows.isEmpty }
@@ -295,9 +388,10 @@ final class HistoryPanelModel {
     }
 
     var emptyState: EmptyState {
-        // Loading/hydrating (P2): the row set is unknown, so no empty state is truthful — the
-        // list region stays blank rather than flashing "No history" / "No results".
-        guard !isLoadingFirstRows && !derived.isHydratingWindow else { return .none }
+        // Loading/scanning: the result set is not settled, so no empty state is truthful — the
+        // list region shows its loading/scanning presentation rather than flashing "No
+        // history" / "No results" that the next batch could contradict.
+        guard !isLoadingFirstRows && !derived.isScanningHistory else { return .none }
         guard filteredRows.isEmpty else { return .none }
         // A truly-empty bucket outranks the narrows: "no results, try a different search" (or a
         // Clear Filter button) is dead-end advice when the scope held nothing to begin with — the
@@ -340,8 +434,8 @@ final class HistoryPanelModel {
     /// shown; the fallback computes on demand for off-screen callers (body never takes that path).
     var categoryCounts: [PanelCategory: Int] {
         if let counts = derived.categoryCounts { return counts }
-        // A prefix window has no exact counts to offer (P2): the chips render without badges
-        // (a partial count posing as exact would break §3.1) until hydration completes.
+        // A prefix window has no exact counts to offer: the chips render without badges (a
+        // partial count posing as exact would break §3.1) until the scan reports exact ones.
         guard historyWindowComplete else { return [:] }
         let rows = classificationCache.resolve(scopedRows, policy: displayPolicy)
         return PanelFilter.counts(PanelSearch.filterCombined(rows, query: searchText))
@@ -354,9 +448,9 @@ final class HistoryPanelModel {
     /// A narrowing input is active over HISTORY rows — search, category chip, or the open chips
     /// row (whose counts need verdicts over everything); the snippets scope narrows only
     /// snippets, whose rows are always complete. THE one predicate behind "this state needs the
-    /// complete window": the filtered tier hydrates on it, `reconcilePrefix` refuses prefix
-    /// commits under it, and the controller routes reconciles to re-hydration by it — one
-    /// truth, three consumers (P3 review: three hand-written copies drifted immediately).
+    /// complete window": the filtered tier runs the scan on it, `reconcilePrefix` refuses
+    /// prefix commits under it, and the controller routes reconciles to a fresh scan by it —
+    /// one truth, three consumers (P3 review: three hand-written copies drifted immediately).
     var isNarrowingHistory: Bool {
         (isSearching || isCategoryFiltering || showsFilterBar) && scope != .snippets
     }

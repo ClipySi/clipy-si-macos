@@ -26,9 +26,14 @@ extension HistoryPanelView {
 
     /// The bottom bar (pager left + preview toggle and version right), extracted to `PanelFooter`
     /// for the size budget. The toggle is the mouse affordance for the fully-hidden preview pane.
+    /// While the progressive scan runs (M-UI.11 P4) the pager yields to a progress readout — an
+    /// unsettled result set has no final page count to promise (§4.6).
     var footer: some View {
         PanelFooter(pageCount: model.pageCount,
                     currentPage: model.currentPage,
+                    isScanning: model.isScanningHistory,
+                    scanProgress: model.visibleScanProgress,
+                    resultCount: model.filteredRows.count,
                     isPreviewShown: model.isPreviewExpanded,
                     previewSide: model.previewSide,
                     onPrev: { model.previousPage() },
@@ -36,11 +41,12 @@ extension HistoryPanelView {
                     onTogglePreview: onTogglePreview)
     }
 
-    /// The list band's content: the list itself, an empty-state card, or (M-UI.11 P2) the
-    /// hydration spinner — indeterminate progress while a narrowing input waits on the
-    /// full-window read, not an unexplained blank (§3.1); never any query text (§3.2).
+    /// The list band's content: the list itself, an empty-state card, or — while the
+    /// progressive scan hasn't produced its first matches yet (M-UI.11 P4) — an indeterminate
+    /// spinner, not an unexplained blank (§3.1); never any query text (§3.2). Once matches
+    /// exist the list renders them live; the footer carries the scan progress.
     @ViewBuilder var listRegion: some View {
-        if model.isHydratingWindow {
+        if model.isScanningHistory && model.filteredRows.isEmpty {
             ProgressView().controlSize(.small).frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             switch model.emptyState {

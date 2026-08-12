@@ -16,27 +16,16 @@ import Foundation
 
 @MainActor
 final class PanelClassificationCache {
-    struct Key: Hashable {
-        let id: RowID
-        let updatedAt: Date?
-        let policy: DisplayPolicy
-    }
+    /// The memo core lives in `CodeVerdictMemo` (shared with the progressive scan's actor-side
+    /// instance — M-UI.11 P4); this class is its MainActor face for the model tier.
+    typealias Stats = CodeVerdictMemo.Stats
 
-    /// Hit/miss counters — the P1 tests pin the caching contract on these (a re-open must not
-    /// re-classify unchanged rows; a policy/version change must never hit).
-    struct Stats: Equatable {
-        var hits = 0
-        var misses = 0
-    }
+    private var memo: CodeVerdictMemo
 
-    private(set) var stats = Stats()
-    /// `.some(nil)` = cached "not code". Bounded: past `capacity` the store clears wholesale —
-    /// cheap, and the next visible page re-warms exactly what is on screen.
-    private var verdicts: [Key: CodeClassifier.Language?] = [:]
-    private let capacity: Int
+    var stats: Stats { memo.stats }
 
     init(capacity: Int = 8_192) {
-        self.capacity = capacity
+        memo = CodeVerdictMemo(capacity: capacity)
     }
 
     /// Returns `rows` with every `needsCodeClassification` row resolved (flag cleared; `.code` +
@@ -44,29 +33,7 @@ final class PanelClassificationCache {
     func resolve(_ rows: [PanelRow], policy: DisplayPolicy) -> [PanelRow] {
         guard rows.contains(where: \.needsCodeClassification) else { return rows }
         return PanelSignpost.measure(.historyClassify, rows: rows.count) {
-            rows.map { resolveRow($0, policy: policy) }
+            rows.map { memo.resolve($0, policy: policy) }
         }
-    }
-
-    private func resolveRow(_ row: PanelRow, policy: DisplayPolicy) -> PanelRow {
-        guard row.needsCodeClassification else { return row }
-        var resolved = row
-        resolved.needsCodeClassification = false
-        let key = Key(id: row.id, updatedAt: row.updatedAt, policy: policy)
-        let language: CodeClassifier.Language?
-        if let cached = verdicts[key] {
-            stats.hits += 1
-            language = cached
-        } else {
-            stats.misses += 1
-            if verdicts.count >= capacity { verdicts.removeAll(keepingCapacity: true) }
-            language = CodeClassifier.classify(row.title)
-            verdicts[key] = language
-        }
-        if let language {
-            resolved.contentKind = .code
-            resolved.codeLanguage = language.rawValue
-        }
-        return resolved
     }
 }

@@ -40,9 +40,20 @@ final class HistoryPanelController {
     /// The first-page read of the current open. Tests await it for a deterministic commit —
     /// the PanelPreviewContentProvider.pendingLoad pattern.
     var openTask: Task<Void, Never>?
-    /// The in-flight next-page / full-window fetches; at most one each (requests coalesce).
+    /// The in-flight next-page fetch; at most one (requests coalesce).
     var pageTask: Task<Void, Never>?
-    var hydrationTask: Task<Void, Never>?
+    /// The in-flight progressive scan (M-UI.11 P4) and the request it serves. `scanRequest`
+    /// outlives the task — it is the coalescing record: one scan (running or settled,
+    /// including failed) serves each distinct request. Cleared per open (`show`): a stale
+    /// record must not suppress the NEXT open's identical query (P4 review).
+    var scanTask: Task<Void, Never>?
+    var scanRequest: HistoryReadService.ScanRequest?
+    /// Coalesces query-keystroke bursts before a scan restarts (D5 debounce).
+    var scanDebounceTask: Task<Void, Never>?
+    /// Bumped on every scan restart so a replaced walk's cleanup can't clear its successor's
+    /// task handle (scans restart WITHOUT bumping `readGeneration` — a query edit must not
+    /// kill the open's page reads).
+    var scanGeneration: UInt64 = 0
     /// The in-flight reconcile read (M-UI.11 P3): re-serves the loaded prefix from current data
     /// after the head observation saw a write land under the open panel.
     var reconcileTask: Task<Void, Never>?
@@ -136,10 +147,11 @@ final class HistoryPanelController {
             onTogglePreview: { [weak self] in self?.togglePreview() },
             previewProvider: previewProvider,
             onListBandDelta: { [weak self] delta in self?.fitListBand(reportedDelta: delta) })
-        // The model's paged-window callbacks (M-UI.11 P2): sequential paging past the loaded
-        // prefix, and hydration when a narrowing input needs the complete window.
+        // The model's paged-window callbacks: sequential paging past the loaded prefix
+        // (M-UI.11 P2), and the progressive scan when a narrowing input needs results over
+        // the whole window (M-UI.11 P4).
         model.onNeedsMoreHistory = { [weak self] in self?.loadNextHistoryPage() }
-        model.onNeedsWindowHydration = { [weak self] in self?.hydrateWindow() }
+        model.onNeedsWindowScan = { [weak self] in self?.startScanIfNeeded() }
     }
 
     /// Apply a band-fit report from the view: the band wants to be `delta` taller (10
@@ -327,6 +339,7 @@ final class HistoryPanelController {
         pageRequest = request
         windowCursor = nil
         pendingReconcile = false
+        scanRequest = nil // per-open: the last open's scan record must not coalesce this one's
         if let warm = warmCache?.snapshot(matching: request) {
             // M-UI.11 P3 warm open (§5.1): the observer-maintained head commits in the SAME
             // turn as the shell — no DB/decrypt work anywhere on this path, and paste is live

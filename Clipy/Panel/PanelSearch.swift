@@ -15,23 +15,38 @@
 import Foundation
 
 enum PanelSearch {
+    /// THE query normalization — whitespace-trimmed; empty means "no narrowing". Every holder
+    /// of a query identity (the model's scan stamp, the controller's scan request, this
+    /// filter) normalizes through here, so "note" and "note " can never count as different
+    /// searches anywhere (M-UI.11 P4 review: a drifted trim site either re-scans a whole
+    /// window for a whitespace keystroke or coalesces two distinct queries).
+    static func normalize(_ query: String) -> String {
+        query.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// THE single-row match — over the masked `title` only, locale-aware contains (case-,
+    /// diacritic- and width-insensitive; matches HistoryFilter / Finder). `term` must already
+    /// be normalized. Shared by the in-memory tier below and the progressive scan (M-UI.11
+    /// P4), so a prefix-window search and a complete-window search can never disagree.
+    static func matches(_ row: PanelRow, term: String) -> Bool {
+        term.isEmpty || row.title.localizedStandardContains(term)
+    }
+
     /// The selectable rows matching `query`, in their original order. An empty (or whitespace-only) query
-    /// returns every row unchanged. Matching is over the masked `title` only. Use this for a flat
-    /// (clip-only) list; for the unified clip+snippet list use `filterCombined` so folder headers are
-    /// retained only when a child matches.
+    /// returns every row unchanged. Use this for a flat (clip-only) list; for the unified
+    /// clip+snippet list use `filterCombined` so folder headers are retained only when a child matches.
     static func filter(_ rows: [PanelRow], query: String) -> [PanelRow] {
-        let term = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let term = normalize(query)
         guard !term.isEmpty else { return rows }
-        // Locale-aware contains: case-, diacritic- and width-insensitive (matches HistoryFilter / Finder).
-        return rows.filter { $0.title.localizedStandardContains(term) }
+        return rows.filter { matches($0, term: term) }
     }
 
     /// Header-aware filter for the unified history+snippet list: clip and snippet rows match by
-    /// title (`localizedStandardContains`); a folder-header row is kept only when at least one of the
-    /// snippet rows that follow it survives. An empty query returns the rows unchanged. Clip titles are
-    /// the masked `displayTitle` (C3) — the raw secret is never part of the haystack.
+    /// title; a folder-header row is kept only when at least one of the snippet rows that
+    /// follow it survives. An empty query returns the rows unchanged. Clip titles are the
+    /// masked `displayTitle` (C3) — the raw secret is never part of the haystack.
     static func filterCombined(_ rows: [PanelRow], query: String) -> [PanelRow] {
-        let term = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let term = normalize(query)
         guard !term.isEmpty else { return rows }
         var result: [PanelRow] = []
         var pendingHeader: PanelRow? // emitted lazily when its first child survives
@@ -40,7 +55,7 @@ enum PanelSearch {
             case .folderHeader:
                 pendingHeader = row
             case .clip, .snippet:
-                guard row.title.localizedStandardContains(term) else { continue }
+                guard matches(row, term: term) else { continue }
                 if let header = pendingHeader {
                     result.append(header)
                     pendingHeader = nil

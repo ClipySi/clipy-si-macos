@@ -54,6 +54,10 @@ extension HistoryPanelModel {
             historyWindowComplete = false
             historyWindowTotal = 0
             historyRows = []
+            // A stale stamp would let this open's identical query render the PREVIOUS open's
+            // matches as settled results (the loading-shell rebuild skips the narrowing-cleared
+            // sweep) — P4 review.
+            clearScanResults()
             self.snippetRows = snippetRows
             scope = (requestedScope == .snippets && snippetRows.isEmpty) ? .all : requestedScope
             searchText = ""
@@ -99,10 +103,10 @@ extension HistoryPanelModel {
     /// Append the next sequential page (the `onNeedsMoreHistory` reply), then complete any
     /// navigation parked on `pendingPage` (§5.3 — the visible page held until its rows existed).
     func appendHistoryPage(_ rows: [PanelRow], windowComplete: Bool) {
-        // A late append must never land on a completed window: hydration can replace the prefix
-        // while a page fetch is in flight, and appending on top would duplicate rows and flip
-        // the window back to prefix bookkeeping (review). The controller guards too — this is
-        // defense in depth.
+        // A late append must never land on a completed window: another commit can finish the
+        // window while a page fetch is in flight, and appending on top would duplicate rows
+        // and flip the window back to prefix bookkeeping (review). The controller guards too —
+        // this is defense in depth.
         guard !historyWindowComplete else {
             pendingPage = nil
             return
@@ -120,27 +124,64 @@ extension HistoryPanelModel {
         }
         if let page = pendingPage {
             pendingPage = nil
-            goToPage(page)
+            // A narrowing began while this fetch was in flight (⌘F leaves no other clear
+            // point): the parked move belongs to the UN-narrowed context — completing it now
+            // would jump the narrowed match list and re-seat the selection (P4 review).
+            if !isNarrowingHistory { goToPage(page) }
         }
     }
 
-    /// Replace the prefix with the COMPLETE capped window (the `onNeedsWindowHydration` reply).
-    /// Deliberately preserves the narrowing inputs that requested it — search text, category,
-    /// chips — and only re-bases the page/selection into the (now trustworthy) filtered rows.
-    func completeWindow(_ rows: [PanelRow], totalCount: Int) {
+    /// Apply one progressive-scan update (M-UI.11 P4; the controller's generation-guarded
+    /// commit). Returns `false` when the update no longer has a narrowing to serve — the
+    /// controller cancels the walk (the stamp already guarantees nothing stale renders; the
+    /// refusal just stops wasted decrypt work). One rebuild per update; the cumulative match
+    /// set arrives in window order, so the visible first page settles with the earliest
+    /// batches and later updates only ever extend the tail. A FAILED update settles with what
+    /// it has — partial matches, no counts, no stuck progress.
+    @discardableResult
+    func applyScanUpdate(_ update: HistoryReadService.ScanUpdate, context: ScanContext) -> Bool {
+        guard isNarrowingHistory, !historyWindowComplete, !isLoadingFirstRows else { return false }
         let previousSelection = selection
         withBatchedInputs {
-            isLoadingFirstRows = false
+            scanMatches = update.matches
+            scanCounts = update.failed ? nil : update.counts
+            scanContext = context
+            scanProgress = update.isSettled ? nil : (update.processed, update.total)
+            // The scan's first read carries the window total from its own transaction — the
+            // scope-tab badge tracks the DB even while the narrowing hides the prefix. Taken
+            // verbatim (no max() with the prefix length — P4 review): a shrunken window's
+            // smaller truth must not be hidden by a stale larger prefix, which the reconcile's
+            // parallel prefix refresh re-bases anyway. A failed update carries no trustworthy
+            // total.
+            if !update.failed { historyWindowTotal = update.total }
+        }
+        // First results claim the top row; later updates keep whatever the user moved to.
+        selection = survivingSelection(previousSelection) ?? firstSelectableVisibleID
+        return true
+    }
+
+    /// The silent re-scan died with the on-screen results still UNSETTLED (a mid-stream scan
+    /// was cancelled for it, then the re-read failed): keep what's shown, stop advertising
+    /// progress — a frozen progress bar with no retry path is the alternative (P4 review).
+    /// The next narrowing edit or head change re-scans.
+    func settleScanAsFailed() {
+        guard scanProgress != nil else { return }
+        withBatchedInputs {
+            scanProgress = nil
+        }
+    }
+
+    /// Refresh the loaded prefix UNDERNEATH a displayed narrowing (M-UI.11 P4 review): the
+    /// scan owns the visible result set, but the prefix must track deletions too — otherwise
+    /// clearing the search would resurface rows that no longer exist (the P3 exit rule; P2's
+    /// whole-window swap used to cover this). The visible matches, page, and selection are
+    /// untouched — the narrowing branch rebuilds from the scan state, not from these rows.
+    func refreshPrefixUnderNarrowing(_ rows: [PanelRow], totalCount: Int, windowComplete: Bool) {
+        guard !isLoadingFirstRows, isNarrowingHistory, !historyWindowComplete else { return }
+        withBatchedInputs {
             historyRows = rows
             historyWindowTotal = max(totalCount, rows.count)
-            historyWindowComplete = true
-        }
-        pendingPage = nil
-        goToPage(currentPage)
-        // A hydration that raced a cleared narrowing must not stomp a highlight the user still
-        // has — keep it when the selected row survived onto the current page (review).
-        if let surviving = survivingSelection(previousSelection) {
-            selection = surviving
+            historyWindowComplete = windowComplete
         }
     }
 
@@ -152,8 +193,14 @@ extension HistoryPanelModel {
     /// the hydration path (`completeWindow`) — a prefix built without the search/category
     /// context must never replace a narrowed window, so those states are skipped here (defense
     /// in depth with the controller's own ordering guards).
+    ///
     func reconcilePrefix(_ rows: [PanelRow], totalCount: Int, windowComplete: Bool) {
-        guard !isLoadingFirstRows, !isNarrowingHistory else { return }
+        guard !isLoadingFirstRows else { return }
+        // A narrowing over a PREFIX window is the scan's to reconcile (a fresh silent scan) —
+        // this prefix has no such context. Over a COMPLETE window the commit is safe and
+        // needed: the rows ARE the whole window, and the rebuild re-applies the narrowing
+        // in-memory (P4).
+        if isNarrowingHistory && !historyWindowComplete { return }
         // A parked page move is the user's live navigation, not stale context: the reconcile
         // cancelled the fetch that was serving it (and the append that would complete it), so
         // re-target it against the fresh window — goToPage re-clamps, and re-parks/fetches if
@@ -182,15 +229,16 @@ extension HistoryPanelModel {
         }
     }
 
-    /// Screen lock (D4): drop every decrypted history row — with masking off they are raw
-    /// plaintext, and `hide()` alone would keep them resident behind the lock. Snippets are
-    /// user-authored plaintext and stay. Not `beginLoading`: there is no open being staged;
-    /// the next `show()` rebuilds whatever it needs.
+    /// Screen lock (D4): drop every decrypted history row — the prefix AND any scan matches —
+    /// with masking off they are raw plaintext, and `hide()` alone would keep them resident
+    /// behind the lock. Snippets are user-authored plaintext and stay. Not `beginLoading`:
+    /// there is no open being staged; the next `show()` rebuilds whatever it needs.
     func purgeHistoryRows() {
         withBatchedInputs {
             historyRows = []
             historyWindowTotal = 0
             historyWindowComplete = true
+            clearScanResults()
         }
         pendingPage = nil
         selection = nil
@@ -261,7 +309,10 @@ extension HistoryPanelModel {
             ? derived.filteredRows.count
             : effectiveRowCount(loaded: derived.filteredRows.count)
         let target = PanelPaging.clampPage(page, rowCount: clampCount, itemsPerPage: itemsPerPage)
-        if !historyWindowComplete && scope != .snippets {
+        // Narrowed states never park (P4): the scan delivers every match without being asked,
+        // and the snippets scope is always fully materialized — only an un-narrowed
+        // history-bearing prefix pages by fetching.
+        if !historyWindowComplete && scope != .snippets && !isNarrowingHistory {
             let neededHistory = min((target + 1) * itemsPerPage, historyWindowTotal)
             if historyRows.count < neededHistory {
                 pendingPage = target
