@@ -16,6 +16,7 @@
 		1A0000000000000000000062 /* Screeen in Frameworks */ = {isa = PBXBuildFile; productRef = 1A0000000000000000000061 /* Screeen */; };
 		1A0000000000000000000072 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = 1A0000000000000000000071 /* Sparkle */; };
 		1A0000000000000000000082 /* ClipySiCore in Frameworks */ = {isa = PBXBuildFile; productRef = 1A0000000000000000000081 /* ClipySiCore */; };
+		1A0000000000000000000092 /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = 1A0000000000000000000091 /* GRDB */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -57,6 +58,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				1A0000000000000000000092 /* GRDB in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -132,6 +134,9 @@
 				1A0000000000000000000014 /* ClipyTests */,
 			);
 			name = ClipyTests;
+			packageProductDependencies = (
+				1A0000000000000000000091 /* GRDB */,
+			);
 			productName = ClipyTests;
 			productReference = 1A0000000000000000000015 /* ClipyTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
@@ -191,6 +196,7 @@
 				1A0000000000000000000050 /* XCRemoteSwiftPackageReference "KeyHolder" */,
 				1A0000000000000000000060 /* XCRemoteSwiftPackageReference "Screeen" */,
 				1A0000000000000000000070 /* XCRemoteSwiftPackageReference "Sparkle" */,
+				1A0000000000000000000090 /* XCRemoteSwiftPackageReference "GRDB.swift" */,
 				1A0000000000000000000080 /* XCLocalSwiftPackageReference "ClipySiCore" */,
 			);
 			targets = (
@@ -538,6 +544,14 @@
 				minimumVersion = 2.1.0;
 			};
 		};
+		1A0000000000000000000090 /* XCRemoteSwiftPackageReference "GRDB.swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/groue/GRDB.swift";
+			requirement = {
+				kind = upToNextMinorVersion;
+				minimumVersion = 7.11.0;
+			};
+		};
 		1A0000000000000000000070 /* XCRemoteSwiftPackageReference "Sparkle" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/sparkle-project/Sparkle";
@@ -593,6 +607,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 1A0000000000000000000080 /* XCLocalSwiftPackageReference "ClipySiCore" */;
 			productName = ClipySiCore;
+		};
+		1A0000000000000000000091 /* GRDB */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 1A0000000000000000000090 /* XCRemoteSwiftPackageReference "GRDB.swift" */;
+			productName = GRDB;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

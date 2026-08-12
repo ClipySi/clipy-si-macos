@@ -147,6 +147,16 @@ struct HistoryPanelView: View {
         // NOT the list view, which reset() may re-insert in the very transaction that bumps the
         // token (no onChange fires on insertion — see focusOnOpen for the full story).
         .onChange(of: model.openToken) { focusOnOpen() }
+        // M-UI.11 P2: the loading shell has no selectable rows, so focusOnOpen parks the open's
+        // focus on the scope tabs. When the first page commits, complete the open contract —
+        // land on the list — but only from that parked state: an active search session, the
+        // overlay, or any deliberately claimed target is never stolen from (review: without
+        // this, Return/digit paste stayed dead on the tabs after every async open).
+        .onChange(of: model.isLoadingFirstRows) { _, loading in
+            guard !loading, !model.isManagementOpen, !isSearchFocused,
+                  focus == .scope || focus == nil else { return }
+            focusOnOpen()
+        }
         // When the chips row disappears from under the focus (⌘F off, or the scope switched to
         // Snippets), re-home to the always-present scope tabs instead of stranding on nil.
         .onChange(of: model.showsFilterBar) { _, shown in
@@ -204,24 +214,6 @@ struct HistoryPanelView: View {
                 })
 
             footer
-        }
-    }
-
-    @ViewBuilder private var listRegion: some View {
-        switch model.emptyState {
-        case .none:
-            list
-        case .searchNoResults(let query):
-            PanelEmptyStateView(variant: .noSearchResults(query: query), accent: accent)
-        case .categoryNoMatches(let category):
-            PanelEmptyStateView(variant: .noCategoryMatches(category), accent: accent) {
-                model.setCategory(.all)
-            }
-        case .snippetsCTA:
-            // Snippets scope with nothing in it → an inviting CTA instead of a bare "No snippets".
-            snippetEmptyState
-        case .noHistory:
-            PanelEmptyStateView(variant: .noHistory, accent: accent)
         }
     }
 
@@ -388,7 +380,9 @@ struct HistoryPanelView: View {
     // Enter/↑/↓/⌘↑ work the instant the panel opens. One page (≤ itemsPerPage rows) fits, so a plain
     // ScrollView + LazyVStack needs no recycling. The list fills the middle band (between the divider and
     // the pager/preview); the panel height is tuned so a default page sits with minimal slack.
-    private var list: some View {
+    /// Internal (not private) so `listRegion` — split into HistoryPanelView+Chrome for the
+    /// file-length budget — can wrap it.
+    var list: some View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: FloatingPanelLayout.listRowSpacing) {

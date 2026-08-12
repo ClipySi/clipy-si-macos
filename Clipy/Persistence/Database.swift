@@ -153,6 +153,27 @@ enum AppDatabase {
                 ) STRICT;
                 """)
         }
+        // M-UI.11 P2: the panel reads history one keyset page at a time. The cursor predicate
+        // `(createdAt, id) < (?, ?)` needs a two-column index in the page order over LIVE rows
+        // only — a thin partial index (`WHERE deletedAt IS NULL`) so tombstones neither bloat it
+        // nor break page seeks. `id` is the tie-breaker: `createdAt` is whole seconds, so
+        // same-second collisions are normal (4/second in the perf fixture).
+        //
+        // D8: `clips_createdAt` (v1) is dropped in the same migration. Every query that ordered
+        // or filtered by `createdAt` also filters `deletedAt IS NULL` (recentClips, clips(),
+        // trim, the History Manager window, latestClip/ingest lookups — the last two seek via
+        // `clips_contentHash` first), so the new partial index subsumes it; queries that DO see
+        // tombstones (`tombstones()`, `pushCandidates`) never used `createdAt` order. Keeping
+        // both would double the per-capture index write for no reader. V4MigrationTests pins the
+        // query plans (`EXPLAIN QUERY PLAN`) so a regression to a table scan cannot land silently.
+        migrator.registerMigration("v4_live_page_index") { db in
+            try db.execute(sql: """
+                CREATE INDEX "clips_live_createdAt_id"
+                ON "clips"("createdAt" DESC, "id" DESC)
+                WHERE "deletedAt" IS NULL;
+                DROP INDEX "clips_createdAt";
+                """)
+        }
         return migrator
     }
 }

@@ -15,6 +15,14 @@
 import Foundation
 import SQLiteData
 
+/// A stable position in the live-history page order — the `(createdAt, id)` VALUES of the last
+/// row served, not a row reference, so the cursor keeps working when that row is mutated or
+/// deleted between pages (M-UI.11 P2 keyset pagination).
+struct ClipPageCursor: Sendable, Hashable {
+    let createdAt: Date
+    let id: UUID
+}
+
 struct ClipRepository {
     @Dependency(\.defaultDatabase) private var database
     @Dependency(\.date) private var date
@@ -36,6 +44,11 @@ struct ClipRepository {
     /// The newest (or, when `ascending` is true, oldest) `limit` live clips by `createdAt`. The
     /// menu flips to ascending when `historySortNewestFirst` is off, matching the original's
     /// sort-direction flip (MenuManager.swift:281).
+    ///
+    /// Ordered by `(createdAt, id)` — the SAME total order as `livePage` (M-UI.11 P2): whole-
+    /// second stamps collide routinely, and if the window read tie-broke differently from the
+    /// keyset walk, swapping a paged prefix for the full window (search hydration) would
+    /// reshuffle rows the user is looking at.
     func recentClips(limit: Int, ascending: Bool = false) throws -> [Clip] {
         // SQLite treats `LIMIT -1` as "no limit", so a negative cap would fetch the whole history
         // (which the menu would then decrypt). Clamp non-negative, mirroring `trim`'s `>= 0` guard.
@@ -44,10 +57,63 @@ struct ClipRepository {
             // `.asc()` / `.desc()` are distinct opaque query types, so they can't share a `?:`.
             if ascending {
                 return try Clip.where { $0.deletedAt.is(nil) }
-                    .order { $0.createdAt.asc() }.limit(cap).fetchAll(db)
+                    .order { ($0.createdAt.asc(), $0.id.asc()) }.limit(cap).fetchAll(db)
             } else {
                 return try Clip.where { $0.deletedAt.is(nil) }
-                    .order { $0.createdAt.desc() }.limit(cap).fetchAll(db)
+                    .order { ($0.createdAt.desc(), $0.id.desc()) }.limit(cap).fetchAll(db)
+            }
+        }
+    }
+
+    /// One keyset page of live clips in the panel's page order — `createdAt`, then `id` as the
+    /// same-second tie-breaker (whole-second stamps collide routinely) — starting AFTER `cursor`
+    /// (nil = from the window's head). Fetches at most `limit` rows; callers pass
+    /// `pageSize + 1` and treat the extra row as the has-more sentinel.
+    ///
+    /// The cursor predicate is a SQL row-value comparison via `#sql` — StructuredQueries 0.31.1
+    /// has no row-value operator in its builder, and the expanded OR form only bounds the index
+    /// seek on `createdAt` (§4.3 PoC: the row-value form plans as
+    /// `SEARCH clips USING INDEX clips_live_createdAt_id ((createdAt,id)<(?,?))`). Binds go
+    /// through the STORED representations — `Date.UnixTimeRepresentation` (INTEGER unix seconds)
+    /// and UUID's default lowercase TEXT — because a mismatched bind would silently mis-order
+    /// same-second groups (KeysetPaginationPoCTests pins this).
+    func livePage(after cursor: ClipPageCursor?, limit: Int, ascending: Bool = false) throws -> [Clip] {
+        let cap = max(0, limit)
+        return try database.read { db in
+            let base = Clip.where { $0.deletedAt.is(nil) }
+            switch (ascending, cursor) {
+            case (false, .none):
+                return try base
+                    .order { ($0.createdAt.desc(), $0.id.desc()) }
+                    .limit(cap)
+                    .fetchAll(db)
+            case (true, .none):
+                return try base
+                    .order { ($0.createdAt.asc(), $0.id.asc()) }
+                    .limit(cap)
+                    .fetchAll(db)
+            case let (false, .some(cursor)):
+                return try base
+                    .where {
+                        #sql("""
+                        (\($0.createdAt), \($0.id)) < \
+                        (\(#bind(cursor.createdAt, as: Date.UnixTimeRepresentation.self)), \(#bind(cursor.id, as: UUID.self)))
+                        """)
+                    }
+                    .order { ($0.createdAt.desc(), $0.id.desc()) }
+                    .limit(cap)
+                    .fetchAll(db)
+            case let (true, .some(cursor)):
+                return try base
+                    .where {
+                        #sql("""
+                        (\($0.createdAt), \($0.id)) > \
+                        (\(#bind(cursor.createdAt, as: Date.UnixTimeRepresentation.self)), \(#bind(cursor.id, as: UUID.self)))
+                        """)
+                    }
+                    .order { ($0.createdAt.asc(), $0.id.asc()) }
+                    .limit(cap)
+                    .fetchAll(db)
             }
         }
     }

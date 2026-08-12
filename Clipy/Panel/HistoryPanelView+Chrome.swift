@@ -36,6 +36,31 @@ extension HistoryPanelView {
                     onTogglePreview: onTogglePreview)
     }
 
+    /// The list band's content: the list itself, an empty-state card, or (M-UI.11 P2) the
+    /// hydration spinner — indeterminate progress while a narrowing input waits on the
+    /// full-window read, not an unexplained blank (§3.1); never any query text (§3.2).
+    @ViewBuilder var listRegion: some View {
+        if model.isHydratingWindow {
+            ProgressView().controlSize(.small).frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            switch model.emptyState {
+            case .none:
+                list
+            case .searchNoResults(let query):
+                PanelEmptyStateView(variant: .noSearchResults(query: query), accent: accent)
+            case .categoryNoMatches(let category):
+                PanelEmptyStateView(variant: .noCategoryMatches(category), accent: accent) {
+                    model.setCategory(.all)
+                }
+            case .snippetsCTA:
+                // Snippets scope with nothing in it → an inviting CTA, not a bare "No snippets".
+                snippetEmptyState
+            case .noHistory:
+                PanelEmptyStateView(variant: .noHistory, accent: accent)
+            }
+        }
+    }
+
     /// Centred CTA when the Snippets scope is empty: opens the snippet editor (it hides the panel first).
     var snippetEmptyState: some View {
         VStack(spacing: 12) {

@@ -17,8 +17,27 @@ import SwiftUI
 final class HistoryPanelController {
     private let panel: FloatingPanel
     private let hosting: NSHostingController<HistoryPanelView>
-    private let model = HistoryPanelModel()
+    /// Internal (not private) so the P2 controller tests can observe commits; production access
+    /// stays confined to this type and the view it hosts.
+    let model = HistoryPanelModel()
     private let coordinator: ClipSelectionCoordinator
+    /// The off-MainActor history read path (M-UI.11 P2): keyset pages + the interim full-window
+    /// fetch for search/category. All DB/decrypt/mask work for the panel goes through it.
+    private let readService: HistoryReadService
+    /// Monotonic read generation, bumped on every show AND hide: an in-flight read commits only
+    /// into the open it was started for — a hidden or re-opened panel drops late results (§5.2).
+    private var readGeneration: UInt64 = 0
+    /// The open's page-query contract (page size, cap, sort, policy), resolved once per show.
+    private var pageRequest: HistoryReadService.PageRequest?
+    /// The keyset continuation after the loaded prefix; nil once the capped window is exhausted.
+    private var windowCursor: ClipPageCursor?
+    /// The first-page read of the current open. Internal (not private) so tests can await the
+    /// commit deterministically — the PanelPreviewContentProvider.pendingLoad pattern.
+    private(set) var openTask: Task<Void, Never>?
+    /// The in-flight next-page / full-window fetches; at most one each (requests coalesce).
+    /// Internal like `openTask` so tests can await the corresponding commits.
+    private(set) var pageTask: Task<Void, Never>?
+    private(set) var hydrationTask: Task<Void, Never>?
     /// Lazy image/file payload loading for the rich preview. Cleared on every hide so no
     /// decrypted thumbnail outlives the panel being on screen.
     private let previewProvider: PanelPreviewContentProvider
@@ -71,8 +90,10 @@ final class HistoryPanelController {
     /// `blobStore` powers the rich preview's lazy image/file loading; nil (tests) keeps the
     /// inert provider, which never decrypts anything.
     init(coordinator: ClipSelectionCoordinator = ClipSelectionCoordinator(),
-         blobStore: EncryptedBlobStore? = nil) {
+         blobStore: EncryptedBlobStore? = nil,
+         readService: HistoryReadService = HistoryReadService()) {
         self.coordinator = coordinator
+        self.readService = readService
         previewProvider = blobStore.map(PanelPreviewContentProvider.live(blobStore:)) ?? .inert
         panel = FloatingPanel(contentRect: NSRect(origin: .zero, size: FloatingPanelLayout.defaultSize))
         hosting = NSHostingController(
@@ -99,6 +120,10 @@ final class HistoryPanelController {
             onTogglePreview: { [weak self] in self?.togglePreview() },
             previewProvider: previewProvider,
             onListBandDelta: { [weak self] delta in self?.fitListBand(reportedDelta: delta) })
+        // The model's paged-window callbacks (M-UI.11 P2): sequential paging past the loaded
+        // prefix, and hydration when a narrowing input needs the complete window.
+        model.onNeedsMoreHistory = { [weak self] in self?.loadNextHistoryPage() }
+        model.onNeedsWindowHydration = { [weak self] in self?.hydrateWindow() }
     }
 
     /// Apply a band-fit report from the view: the band wants to be `delta` taller (10
@@ -234,8 +259,10 @@ final class HistoryPanelController {
     /// if given, else the cursor), take key without activating the app, and start the outside-click
     /// monitor. `anchorPoint` is a screen point used as the panel's top-left (the status item's bottom-left).
     private func show(scope: HistoryPanelModel.Scope, anchorPoint: CGPoint?) {
-        // M-UI.11 P0 baseline: the whole open is synchronous today, so first-rows and shell end
-        // back to back — the two intervals exist to show that gap opening up once show-first lands.
+        // M-UI.11 P2 show-first: the shell (panel window + snippet rows + loading list) orders
+        // front synchronously with NO history DB/decrypt work on this path; the first keyset
+        // page is fetched on `HistoryReadService` and committed as ONE generation-guarded model
+        // snapshot. `openToShell` closes at makeKey; `openToFirstRows` closes at that commit.
         let openToShell = PanelSignpost.begin(.openToShell)
         let openToFirstRows = PanelSignpost.begin(.openToFirstRows)
 
@@ -245,23 +272,17 @@ final class HistoryPanelController {
         #endif
         onWillShow?() // PasteService.captureFrontmost() — must run before the panel takes key (§2.2)
 
-        // Apply the per-open paging config, then refill from a fresh history snapshot. `reset` returns
-        // to page 0, highlights the top row, and bumps openToken to re-drive list focus (panel reuse).
-        // The display policy is resolved ONCE for the whole open (M-UI.11 P1) and swapped in WITH
-        // the rows inside reset — a separate stamp would resolve the previous open's rows under the
-        // new policy and poison the classification cache (review).
+        // Apply the per-open paging config and enter the loading shell. `beginLoading` clears the
+        // previous open's rows (nothing stale is selectable), swaps the display policy in
+        // atomically with that clear (the P1 cache-poisoning rule), and bumps openToken to
+        // re-drive list focus (panel reuse). The policy is resolved ONCE for the whole open.
         let config = coordinator.panelSettings
         let policy = DisplayPolicy.current()
         model.itemsPerPage = config.itemsPerPage
         model.startWithZero = config.startWithZero
         model.markedWithNumbers = config.markedWithNumbers
-        let historyRows = coordinator.historyRows(policy: policy)
         let snippetRows = PanelSignpost.measure(.snippetRowsBuild) { coordinator.snippetRows() }
-        let rowCount = historyRows.count + snippetRows.count
-        PanelSignpost.measure(.modelCommit, rows: rowCount) {
-            model.reset(historyRows: historyRows, snippetRows: snippetRows, scope: scope, policy: policy)
-        }
-        PanelSignpost.end(.openToFirstRows, openToFirstRows, rows: rowCount)
+        model.beginLoading(snippetRows: snippetRows, scope: scope, policy: policy)
 
         // Apply the persisted preview-pane preference before positioning, so the cursor clamp math
         // sees the size the panel will actually open at (expanded panels near a screen edge must
@@ -271,17 +292,42 @@ final class HistoryPanelController {
         openSize.height += listBandAdjustment // band auto-fit carries across opens
         panel.setContentSize(openSize)
 
-        // Kick off the rich preview's payload for the row highlighted at open (selection changes
-        // re-request from the view's onChange). A hidden pane loads — decrypts — nothing.
-        if model.isPreviewExpanded {
-            previewProvider.request(model.selectedRow)
-        }
-
         position(anchorPoint: anchorPoint)
         panel.makeKeyAndOrderFront(nil)
         // Push first responder into the hosted SwiftUI content so it can receive key events (arrow/Return).
         panel.makeFirstResponder(hosting.view)
-        PanelSignpost.end(.openToShell, openToShell, rows: rowCount)
+        PanelSignpost.end(.openToShell, openToShell, rows: snippetRows.count)
+
+        // First-page read. The unstructured Task inherits the MainActor, so everything below the
+        // awaited actor call is a plain MainActor mutation; the generation guard drops the commit
+        // when the panel was hidden or re-shown while the read ran. The preview payload kicks off
+        // only after the commit — the selection doesn't exist before it.
+        cancelReads()
+        readGeneration &+= 1
+        let generation = readGeneration
+        let request = HistoryReadService.PageRequest(
+            pageSize: config.itemsPerPage,
+            historyLimit: config.maxHistorySize,
+            ascending: config.sortAscending,
+            policy: policy)
+        pageRequest = request
+        windowCursor = nil
+        openTask = Task { [weak self] in
+            guard let self else { return }
+            let result = await readService.openPage(request)
+            guard generation == readGeneration else { return }
+            windowCursor = result.nextCursor
+            let rowCount = result.rows.count + snippetRows.count
+            PanelSignpost.measure(.modelCommit, rows: rowCount) {
+                self.model.commitFirstPage(historyRows: result.rows,
+                                           totalCount: result.totalCount,
+                                           windowComplete: result.nextCursor == nil)
+            }
+            PanelSignpost.end(.openToFirstRows, openToFirstRows, rows: rowCount)
+            if model.isPreviewExpanded {
+                previewProvider.request(model.selectedRow)
+            }
+        }
 
         #if DEBUG
         // Focus PoC (§2.5): did taking key steal frontmost? With `.nonactivatingPanel` it should not.
@@ -304,10 +350,67 @@ final class HistoryPanelController {
 
     func hide() {
         removeClickMonitor()
+        // Cancel in-flight reads and invalidate their generation: a hidden panel never receives
+        // a late commit (M-UI.11 P2 §5.2), and the next show starts a fresh generation anyway.
+        cancelReads()
+        readGeneration &+= 1
         // Destroy decrypted preview payloads with the panel (security rule: nothing decoded
         // outlives the open).
         previewProvider.clear()
         panel.orderOut(nil)
+    }
+
+    // MARK: - Paged reads (M-UI.11 P2)
+
+    private func cancelReads() {
+        openTask?.cancel()
+        openTask = nil
+        pageTask?.cancel()
+        pageTask = nil
+        hydrationTask?.cancel()
+        hydrationTask = nil
+    }
+
+    /// The model parked a sequential page move on rows beyond the loaded prefix: fetch the next
+    /// keyset page and append. One fetch at a time — `goToPage` re-fires after each append if
+    /// the user is still ahead of the prefix. Cancellation is generation-based: `cancelReads`
+    /// is always followed by a generation bump, so a stale task simply never commits (and never
+    /// touches the controller's task/cursor state — it might already belong to a newer open).
+    private func loadNextHistoryPage() {
+        // Mutual exclusion with hydration: a page fetched while the full window is being read
+        // would land AFTER completeWindow and try to append onto a finished window (review).
+        guard pageTask == nil, hydrationTask == nil,
+              let request = pageRequest, let cursor = windowCursor else { return }
+        let generation = readGeneration
+        let loaded = model.historyRows.count
+        pageTask = Task { [weak self] in
+            guard let self else { return }
+            let result = await readService.nextPage(after: cursor, loadedCount: loaded, request)
+            guard generation == readGeneration else { return }
+            pageTask = nil
+            // Hydration can still have completed the window in the same generation while this
+            // page was in flight — the append is then moot and the cursor stays retired; a
+            // resurrected cursor would break the prefix invariant (review).
+            guard !model.historyWindowComplete else { return }
+            windowCursor = result.nextCursor
+            model.appendHistoryPage(result.rows, windowComplete: result.nextCursor == nil)
+        }
+    }
+
+    /// A narrowing input (search / category / chips) needs the COMPLETE capped window — the P2
+    /// interim path (P4: progressive scan). The model may re-fire while the need persists; the
+    /// in-flight task coalesces those. Off-main, generation-guarded like every read.
+    private func hydrateWindow() {
+        guard hydrationTask == nil, let request = pageRequest else { return }
+        let generation = readGeneration
+        hydrationTask = Task { [weak self] in
+            guard let self else { return }
+            let result = await readService.fullWindow(request)
+            guard generation == readGeneration else { return }
+            hydrationTask = nil
+            windowCursor = nil
+            model.completeWindow(result.rows, totalCount: result.totalCount)
+        }
     }
 
     // MARK: - Private

@@ -16,6 +16,16 @@
 //  `PanelClassificationCache` — for the visible page always, and for ALL scoped rows only when a
 //  title-dependent category (.text/.code) or the chip counts actually need verdicts.
 //
+//  M-UI.11 P2 (show-first + keyset): `historyRows` is no longer always the whole capped window.
+//  A fresh open goes through `beginLoading` (shell up, list EMPTY, paste dead) and then
+//  `commitFirstPage` — after which the rows are a sequential PREFIX of the window and paging
+//  math runs on `historyWindowTotal`. Sequential page moves past the prefix park on
+//  `pendingPage` and ask the controller for more via `onNeedsMoreHistory`; narrowing inputs
+//  (search / category / chips) can't be answered from a prefix, so they hold a blank list and
+//  request the complete window via `onNeedsWindowHydration` (P2 interim — P4 replaces that with
+//  a progressive scan). Legacy `reset` still commits a complete window in one call (tests, and
+//  any caller that already has every row).
+//
 
 import Foundation
 import Observation
@@ -84,11 +94,45 @@ final class HistoryPanelModel {
     var startWithZero = false { didSet { if oldValue != startWithZero { pageDidChange() } } }
     var markedWithNumbers = true
 
+    // MARK: - Windowed history (M-UI.11 P2)
+
+    // The three window-state fields below are internal-settable only for the mutation extension
+    // split (HistoryPanelModel+Mutations.swift); nothing outside the model's own mutations may
+    // write them.
+
+    /// True from `beginLoading` until `commitFirstPage`/`completeWindow`: the shell is up but the
+    /// row set is indeterminate, so the derived tier stays EMPTY — nothing to select, number, or
+    /// paste (§3.1: loading must not let Return/digits fire on unconfirmed rows). Mutated only
+    /// inside the batch mutations, so it needs no didSet of its own.
+    var isLoadingFirstRows = false
+    /// False while `historyRows` is a sequential PREFIX of the capped live window (normal paged
+    /// browsing); true when it holds everything this open can show (legacy `reset`, a hydrated
+    /// window, or an exhausted walk). Narrowing requires a complete window.
+    var historyWindowComplete = true
+    /// Live clips in the capped window (`min(live count, maxHistorySize)`) — the paging/badge
+    /// total while the rows are a prefix. Meaningless (and unused) once `historyWindowComplete`;
+    /// the forwarders switch to `historyRows.count` there.
+    var historyWindowTotal = 0
+
+    /// Sequential paging wants rows beyond the loaded prefix: the controller fetches the next
+    /// keyset page (from its cursor) and replies via `appendHistoryPage`. Fired from `goToPage`.
+    @ObservationIgnored var onNeedsMoreHistory: (() -> Void)?
+    /// A narrowing input (search / category / chips) needs the COMPLETE capped window: the
+    /// controller fetches it off-main and replies via `completeWindow`. May fire repeatedly
+    /// while the need persists — the controller coalesces in-flight requests.
+    @ObservationIgnored var onNeedsWindowHydration: (() -> Void)?
+    /// The page a blocked `goToPage` is waiting to land on (§5.3: the visible page holds until
+    /// the rows exist — never a seam of misplaced rows). Applied by `appendHistoryPage`.
+    /// Internal only for the mutation extension split — treat as private.
+    @ObservationIgnored var pendingPage: Int?
+
     // MARK: - Derived snapshot
 
     /// The derived list state. Stored (and observable, so `body` re-renders on rebuild); the
     /// forwarders below keep the pre-P1 property surface intact for the view and the tests.
-    private struct DerivedState {
+    /// Internal (not private) only for the mutation extension split
+    /// (HistoryPanelModel+Mutations.swift, a lint file-length measure) — not API.
+    struct DerivedState {
         var filteredRows: [PanelRow] = []
         var visibleRows: [PanelRow] = []
         var selectableVisibleRows: [PanelRow] = []
@@ -99,9 +143,12 @@ final class HistoryPanelModel {
         /// nil while the chips row is hidden — nothing on screen needs counts then; the
         /// `categoryCounts` forwarder computes on demand for off-screen callers (tests).
         var categoryCounts: [PanelCategory: Int]?
+        /// A narrowing input is waiting on the complete window (M-UI.11 P2): the list renders
+        /// blank — partial matches over a prefix must never pose as results (§3.1).
+        var isHydratingWindow = false
     }
 
-    private var derived = DerivedState()
+    private(set) var derived = DerivedState()
     /// Suppresses per-didSet rebuilds while a multi-field mutation (reset/setScope/…) runs; the
     /// mutation rebuilds once at the end.
     @ObservationIgnored private var isBatchingInputs = false
@@ -123,7 +170,8 @@ final class HistoryPanelModel {
     }
 
     /// Runs `mutate` with per-didSet rebuilds suppressed, then rebuilds the filtered tier once.
-    private func withBatchedInputs(_ mutate: () -> Void) {
+    /// Internal only for the mutation extension split — never call from outside the model.
+    func withBatchedInputs(_ mutate: () -> Void) {
         isBatchingInputs = true
         mutate()
         isBatchingInputs = false
@@ -134,8 +182,31 @@ final class HistoryPanelModel {
     /// the chips row is shown. Ends by rebuilding the page tier (the slice depends on the result).
     private func rebuildFilteredTier() {
         filteredRebuildCount += 1
+        // Loading shell (P2): the HISTORY row set is indeterminate — the history-bearing scopes
+        // render nothing (nothing to select, number, or paste). The snippets scope falls through
+        // and stays fully live: its rows arrived synchronously with the shell and the history
+        // commit cannot change them, so a fast "⌘⇧B then digit" paste keeps working, and the
+        // scope-tab badges keep their real snippet counts (review).
+        if isLoadingFirstRows && scope != .snippets {
+            var next = DerivedState()
+            next.snippetSelectableCount = snippetRows.count(where: \.isSelectable)
+            derived = next
+            return
+        }
         var next = DerivedState()
         next.snippetSelectableCount = snippetRows.count(where: \.isSelectable)
+        // A narrowing input over a PREFIX window can't produce trustworthy rows or counts —
+        // hold a blank list and ask for the complete window (P2 interim; P4: progressive scan).
+        // Callback last: it only spawns the controller's fetch task, never mutates the model
+        // synchronously. The snippets scope never hydrates: its rows are always complete and
+        // history plays no part in its results (review).
+        if (isSearching || isCategoryFiltering || showsFilterBar) && !historyWindowComplete
+            && scope != .snippets {
+            next.isHydratingWindow = true
+            derived = next
+            onNeedsWindowHydration?()
+            return
+        }
         let scoped = scopedRows
         // Verdicts are needed up front ONLY for a title-dependent category or the chip counts;
         // otherwise the page tier classifies just the visible slice.
@@ -153,11 +224,26 @@ final class HistoryPanelModel {
         rebuildPageTier()
     }
 
+    /// The paging denominator: the loaded (filtered) rows once the window is complete; the
+    /// scope's TOTAL rendered rows (capped live count + snippet rows incl. headers) while it is
+    /// a prefix — the footer must show the real page count even though only the walked pages are
+    /// materialized. A prefix is by construction un-narrowed (narrowing hydrates first), so the
+    /// filtered set equals the scoped set there.
+    func effectiveRowCount(loaded: Int) -> Int {
+        guard !historyWindowComplete else { return loaded }
+        switch scope {
+        case .history: return historyWindowTotal
+        case .all: return historyWindowTotal + snippetRows.count
+        case .snippets: return snippetRows.count
+        }
+    }
+
     /// The O(page) tier: slice the current page out of the filtered rows, resolve its
     /// classification (glyphs/preview), and precompute the number maps.
     private func rebuildPageTier() {
         var next = derived
-        next.pageCount = PanelPaging.pageCount(rowCount: next.filteredRows.count, itemsPerPage: itemsPerPage)
+        next.pageCount = PanelPaging.pageCount(rowCount: effectiveRowCount(loaded: next.filteredRows.count),
+                                               itemsPerPage: itemsPerPage)
         let range = PanelPaging.range(page: currentPage, rowCount: next.filteredRows.count, itemsPerPage: itemsPerPage)
         let visible = classificationCache.resolve(Array(next.filteredRows[range]), policy: displayPolicy)
         next.visibleRows = visible
@@ -184,9 +270,14 @@ final class HistoryPanelModel {
     /// Total selectable items per scope, for the tab-bar count badges. Totals (not the filtered/visible
     /// count) so the badges read as "how many items live in each bucket"; `historyRows` are all clips
     /// (selectable), `snippetRows` interleave non-selectable folder headers so those are excluded.
-    var historyCount: Int { historyRows.count }
+    /// While the window is a prefix (P2), the history badge shows the WINDOW total, not the loaded
+    /// prefix — the bucket's size doesn't shrink because only one page is materialized.
+    var historyCount: Int { historyWindowComplete ? historyRows.count : historyWindowTotal }
     var snippetCount: Int { derived.snippetSelectableCount }
     var allCount: Int { historyCount + snippetCount }
+
+    /// A narrowing input is waiting on the complete window (blank list, no counts) — P2 interim.
+    var isHydratingWindow: Bool { derived.isHydratingWindow }
 
     /// Nothing to show at all (no history and no snippets) — distinct from "no search results".
     var isEmpty: Bool { historyRows.isEmpty && snippetRows.isEmpty }
@@ -203,6 +294,9 @@ final class HistoryPanelModel {
     }
 
     var emptyState: EmptyState {
+        // Loading/hydrating (P2): the row set is unknown, so no empty state is truthful — the
+        // list region stays blank rather than flashing "No history" / "No results".
+        guard !isLoadingFirstRows && !derived.isHydratingWindow else { return .none }
         guard filteredRows.isEmpty else { return .none }
         // A truly-empty bucket outranks the narrows: "no results, try a different search" (or a
         // Clear Filter button) is dead-end advice when the scope held nothing to begin with — the
@@ -245,6 +339,9 @@ final class HistoryPanelModel {
     /// shown; the fallback computes on demand for off-screen callers (body never takes that path).
     var categoryCounts: [PanelCategory: Int] {
         if let counts = derived.categoryCounts { return counts }
+        // A prefix window has no exact counts to offer (P2): the chips render without badges
+        // (a partial count posing as exact would break §3.1) until hydration completes.
+        guard historyWindowComplete else { return [:] }
         let rows = classificationCache.resolve(scopedRows, policy: displayPolicy)
         return PanelFilter.counts(PanelSearch.filterCombined(rows, query: searchText))
     }
@@ -294,130 +391,5 @@ final class HistoryPanelModel {
     var selectionIsAtVisibleBottom: Bool {
         guard let selection, let bottomID = derived.selectableVisibleRows.last?.id else { return true }
         return selection == bottomID
-    }
-
-    // MARK: - Mutations
-
-    /// Refills both row sets for a fresh open: clears any prior search, resets to page 0, and highlights
-    /// the top selectable row. `requestedScope` lets a caller open straight onto a scope (e.g. the snippet
-    /// hotkey → `.snippets`); it falls back to `.all` when that scope would be empty.
-    ///
-    /// `policy` swaps in ATOMICALLY with the rows (nil keeps the current one). Stamping the policy
-    /// separately before the rows would resolve the PREVIOUS open's rows — titles masked under the
-    /// old policy — into cache entries keyed by the new policy, and the poisoned verdicts would
-    /// then hit for the new rows (review, P1).
-    func reset(historyRows: [PanelRow], snippetRows: [PanelRow], scope requestedScope: Scope = .all,
-               policy: DisplayPolicy? = nil) {
-        withBatchedInputs {
-            if let policy { displayPolicy = policy }
-            self.historyRows = historyRows
-            self.snippetRows = snippetRows
-            self.scope = (requestedScope == .snippets && snippetRows.isEmpty) ? .all : requestedScope
-            searchText = ""
-            category = .all
-            isFilterBarOpen = false
-            currentPage = 0
-        }
-        selection = firstSelectableVisibleID
-        isManagementOpen = false
-        openToken &+= 1
-    }
-
-    /// Close the chips row, clearing any active category, in ONE rebuild (the funnel toggle-off /
-    /// ⌘F-off path — `isFilterBarOpen = false` followed by `setCategory(.all)` would walk the rows
-    /// twice). A closed bar must never keep narrowing the list.
-    func closeFilterBar() {
-        guard isFilterBarOpen else { return }
-        let hadCategory = category != .all
-        withBatchedInputs {
-            isFilterBarOpen = false
-            if hadCategory {
-                category = .all
-                currentPage = 0
-            }
-        }
-        if hadCategory { selection = firstSelectableVisibleID }
-    }
-
-    /// Switch the category chip and re-base to page 0 + top selectable row, keeping scope and query.
-    func setCategory(_ newCategory: PanelCategory) {
-        guard newCategory != category else { return }
-        withBatchedInputs {
-            category = newCategory
-            currentPage = 0
-        }
-        selection = firstSelectableVisibleID
-    }
-
-    /// Re-base paging/selection after the query changes: page 0 of the new result set, top selectable row.
-    /// (The query's own didSet already rebuilt the filtered tier.)
-    func searchTextDidChange() {
-        currentPage = 0
-        selection = firstSelectableVisibleID
-    }
-
-    /// Switch scope (⌘1/⌘2/⌘3) and re-base to page 0 + top selectable row, keeping the query.
-    /// Entering the Snippets scope clears the category filter (snippets carry no content kind —
-    /// any non-All chip would blank the list confusingly; the chips row is hidden there too).
-    func setScope(_ newScope: Scope) {
-        guard newScope != scope else { return }
-        withBatchedInputs {
-            scope = newScope
-            if newScope == .snippets {
-                category = .all
-            }
-            currentPage = 0
-        }
-        selection = firstSelectableVisibleID
-    }
-
-    /// Move to `page` (clamped) and highlight that page's top selectable row.
-    func goToPage(_ page: Int) {
-        currentPage = PanelPaging.clampPage(page, rowCount: derived.filteredRows.count, itemsPerPage: itemsPerPage)
-        selection = firstSelectableVisibleID
-    }
-
-    func nextPage() { goToPage(currentPage + 1) }
-    func previousPage() { goToPage(currentPage - 1) }
-
-    /// Move the highlight to the next selectable row on the page (clamped at the bottom). No-op when the
-    /// page has no selectable rows. ↓ in the list.
-    func selectNext() {
-        let rows = derived.selectableVisibleRows
-        guard !rows.isEmpty else { return }
-        guard let current = selection, let index = rows.firstIndex(where: { $0.id == current }) else {
-            selection = rows.first?.id
-            return
-        }
-        selection = rows[min(index + 1, rows.count - 1)].id
-    }
-
-    /// Move the highlight to the previous selectable row. Returns `false` when already at the top selectable
-    /// row (so the caller hands focus up to the search field); ↑ in the list.
-    @discardableResult
-    func selectPrevious() -> Bool {
-        let rows = derived.selectableVisibleRows
-        guard !rows.isEmpty else { return false }
-        guard let current = selection, let index = rows.firstIndex(where: { $0.id == current }) else {
-            selection = rows.first?.id
-            return true
-        }
-        guard index > 0 else { return false }
-        selection = rows[index - 1].id
-        return true
-    }
-
-    /// The visible *selectable* row bound to the pressed number key (`"1"`…`"9"`, `"0"`), if any. Folder
-    /// headers are skipped, so digits index the selectable rows (clip or snippet) of the page in order.
-    func row(forNumberKey key: String) -> PanelRow? {
-        derived.rowByNumberKey[key]
-    }
-
-    /// The "N." prefix number to display for `row`, or `nil` for a header / when numbering is off / past
-    /// the first 10 selectable rows. Numbering counts only selectable rows (folder headers don't consume
-    /// a digit), so the shown number always matches the key that pastes it.
-    func displayNumber(for row: PanelRow) -> Int? {
-        guard markedWithNumbers else { return nil }
-        return derived.numberByRowID[row.id]
     }
 }

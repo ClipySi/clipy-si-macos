@@ -17,9 +17,10 @@ import SQLiteData
 /// disk (referenced by `dataPath`); only metadata is stored in the DB.
 ///
 /// `titleCipher` is the content preview — sensitive, so it is stored as an AES-GCM
-/// ciphertext BLOB (not plaintext). Capture encrypts it via `HistoryCipher`; the menu
-/// decrypts the few visible items at display time. The repository treats it as opaque
-/// `Data` (security-guidance.md §5 / R3).
+/// ciphertext BLOB (not plaintext). Capture encrypts it via `HistoryCipher`; reads decrypt
+/// at display time, one keyset page at a time for the panel (`HistoryReadService`, M-UI.11
+/// P2) and as a bounded window for search and the History Manager. The repository treats
+/// it as opaque `Data` (security-guidance.md §5 / R3).
 @Table("clips")
 struct Clip: Identifiable, Sendable {
     let id: UUID

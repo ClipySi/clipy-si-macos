@@ -100,6 +100,10 @@ struct PanelSettings: Equatable, Sendable {
     let itemsPerPage: Int
     let startWithZero: Bool
     let markedWithNumbers: Bool
+    /// M-UI.11 P2 — the page-query contract inputs, snapshotted with the same per-open read so
+    /// sort/limit can't shear against the pages fetched under them.
+    let maxHistorySize: Int
+    let sortAscending: Bool
 }
 
 @MainActor
@@ -124,7 +128,9 @@ final class ClipSelectionCoordinator {
         let settings = model.settings
         return PanelSettings(itemsPerPage: settings.historyPanelItemsPerPage,
                              startWithZero: settings.menuItemsTitleStartWithZero,
-                             markedWithNumbers: settings.menuItemsAreMarkedWithNumbers)
+                             markedWithNumbers: settings.menuItemsAreMarkedWithNumbers,
+                             maxHistorySize: settings.maxHistorySize,
+                             sortAscending: !settings.historySortNewestFirst)
     }
 
     /// The current history rows (newest- or oldest-first per settings), decrypted + masked under
@@ -134,51 +140,23 @@ final class ClipSelectionCoordinator {
     /// magnitude over decrypt+mask) — plain-text candidates are flagged for the model's lazy,
     /// cached resolution instead.
     func historyRows(policy: DisplayPolicy) -> [PanelRow] {
-        model.history(policy: policy).map { display in
-            let body = Self.displayBody(for: display)
-            let kind = Self.contentKind(for: display)
-            var row = PanelRow.clip(display.id,
-                                    title: body,
-                                    isSecret: display.isSecret,
-                                    decryptFailed: display.decryptFailed,
-                                    contentKind: kind,
-                                    createdAt: display.createdAt,
-                                    sourceBundle: display.sourceBundle)
-            row.updatedAt = display.updatedAt
-            // Only plain-text candidates can be upgraded to `.code`. A masked secret is all
-            // bullets — no code structure — so flagging it is harmless (cached verdict: not code);
-            // a decrypt-failed placeholder is skipped outright.
-            row.needsCodeClassification = kind == .text && !display.decryptFailed
-            return row
-        }
+        model.history(policy: policy).map(PanelRowBuilder.historyRow(for:))
     }
 
     func historyRows() -> [PanelRow] {
         historyRows(policy: .current(settings: model.settings))
     }
 
-    /// The coarse content type behind a clip row's leading glyph. Reliable signals only: the
-    /// primary UTType for image/PDF/file, the color flag, and an `http(s)://` prefix on the *masked*
-    /// display title for a URL — a masked secret stays `.text` (its bullets never match). No
-    /// command/terminal guessing. Display-only; mirrors `displayBody`'s type switch.
+    // The row-conversion helpers moved to `PanelRowBuilder` (M-UI.11 P2 — the off-main
+    // HistoryReadService shares them, and statics on this @MainActor class inherit its
+    // isolation). These wrappers keep the existing call sites/tests compiling.
+
     static func contentKind(for display: ClipDisplay) -> PanelRow.ContentKind {
-        if display.decryptFailed { return .text }
-        switch display.primaryType {
-        case NSPasteboard.PasteboardType.tiff.rawValue: return .image
-        case NSPasteboard.PasteboardType.pdf.rawValue: return .pdf
-        case NSPasteboard.PasteboardType.fileURL.rawValue: return .file
-        default:
-            if display.isColorCode { return .color }
-            if Self.looksLikeURL(display.displayTitle) { return .url }
-            return .text
-        }
+        PanelRowBuilder.contentKind(for: display)
     }
 
-    /// A conservative URL test for the content-kind glyph: a leading `http://`/`https://` after trimming.
-    /// Intentionally narrow — it only upgrades the glyph, so a miss just shows the text glyph (no harm).
     static func looksLikeURL(_ title: String) -> Bool {
-        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://")
+        PanelRowBuilder.looksLikeURL(title)
     }
 
     /// The enabled snippet folders flattened into panel rows: a non-selectable folder-header row followed
@@ -202,24 +180,8 @@ final class ClipSelectionCoordinator {
         return rows
     }
 
-    /// The user-visible body of a clip row: the masked `displayTitle` for text, the original's
-    /// bracketed placeholders for non-text primaries, and a fixed marker when decryption failed. The
-    /// raw `display.title` is never returned (the §9 leakage guarantee). Moved here from the NSMenu
-    /// controller — the panel is now the only renderer of clip bodies.
     static func displayBody(for display: ClipDisplay) -> String {
-        if display.decryptFailed {
-            return String(localized: "(decryption failed)", comment: "Menu title when a clipboard item can't be decrypted")
-        }
-        switch display.primaryType {
-        case NSPasteboard.PasteboardType.tiff.rawValue:
-            return String(localized: "(Image)", comment: "Placeholder menu title for an image clip")
-        case NSPasteboard.PasteboardType.pdf.rawValue:
-            return String(localized: "(PDF)", comment: "Placeholder menu title for a PDF clip")
-        case NSPasteboard.PasteboardType.fileURL.rawValue:
-            return String(localized: "(Filenames)", comment: "Placeholder menu title for a file clip")
-        default:
-            return display.displayTitle
-        }
+        PanelRowBuilder.displayBody(for: display)
     }
 
     /// Pastes the chosen row, routed by kind. The masked-secret AuthGate lives ONLY on the clip path

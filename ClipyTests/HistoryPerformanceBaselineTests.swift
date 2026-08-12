@@ -245,6 +245,55 @@ import Testing
         }
     }
 
+    /// M-UI.11 P2: the read-service open path — what a cold open costs OFF the MainActor now.
+    /// `serviceOpenPage` fetches + decrypts one page (pageSize + sentinel) regardless of corpus
+    /// size — the exit criterion made measurable; `serviceFullWindow` is the search-hydration
+    /// interim (≈ the pre-P2 whole-window open cost, now paid only when the user narrows).
+    /// Mask ON / full style via the same live-shaped evaluator as `stageBaseline`.
+    @Test func serviceOpenPageBaseline() async throws {
+        let clock = ContinuousClock()
+        let config = Self.liveShapedConfig()
+        _ = isSecret(text: "warm-up probe", config: config)
+        for size in Self.sizes {
+            let corpus = try PerfFixture.makeCorpus(liveCount: size)
+            try await withDependencies {
+                $0.defaultDatabase = corpus.database
+                $0.historyCipher = PerfFixture.cipher
+                $0.maskingService = MaskingService { text in
+                    guard !text.isEmpty else { return MaskingResult(isSecret: false, display: text) }
+                    return MaskingResult(isSecret: isSecret(text: text, config: config),
+                                         display: mask(text: text, config: config))
+                }
+            } operation: {
+                let service = HistoryReadService()
+                let request = HistoryReadService.PageRequest(
+                    pageSize: 10, historyLimit: 100_000, ascending: false,
+                    policy: DisplayPolicy(maskEnabled: true, maskStyleRaw: "full",
+                                          classifierAlgorithmVersion: CodeClassifier.algorithmVersion))
+                var openSamples: [Duration] = []
+                var pageRows = 0
+                for _ in 0..<7 {
+                    var result: HistoryReadService.PageResult?
+                    openSamples.append(await clock.measure {
+                        result = await service.openPage(request)
+                    })
+                    pageRows = result?.rows.count ?? 0
+                }
+                #expect(pageRows == 10)
+                var windowSamples: [Duration] = []
+                var windowRows = 0
+                for _ in 0..<(size >= 5_000 ? 3 : 5) {
+                    windowSamples.append(await clock.measure {
+                        windowRows = await service.fullWindow(request).rows.count
+                    })
+                }
+                #expect(windowRows == corpus.liveCount)
+                report("serviceOpenPage", size: size, rows: pageRows, openSamples)
+                report("serviceFullWindow", size: size, rows: windowRows, windowSamples)
+            }
+        }
+    }
+
     /// One summary line per stage: counts and milliseconds only (§3.2 non-leak contract).
     /// p50/min/max — with ≤7 samples a p95 would just be the max wearing a lab coat.
     private func report(_ stage: String, size: Int, rows: Int, _ samples: [Duration], extra: String = "") {
