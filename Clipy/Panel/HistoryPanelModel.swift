@@ -198,10 +198,8 @@ final class HistoryPanelModel {
         // A narrowing input over a PREFIX window can't produce trustworthy rows or counts —
         // hold a blank list and ask for the complete window (P2 interim; P4: progressive scan).
         // Callback last: it only spawns the controller's fetch task, never mutates the model
-        // synchronously. The snippets scope never hydrates: its rows are always complete and
-        // history plays no part in its results (review).
-        if (isSearching || isCategoryFiltering || showsFilterBar) && !historyWindowComplete
-            && scope != .snippets {
+        // synchronously.
+        if isNarrowingHistory && !historyWindowComplete {
             next.isHydratingWindow = true
             derived = next
             onNeedsWindowHydration?()
@@ -227,14 +225,17 @@ final class HistoryPanelModel {
     /// The paging denominator: the loaded (filtered) rows once the window is complete; the
     /// scope's TOTAL rendered rows (capped live count + snippet rows incl. headers) while it is
     /// a prefix — the footer must show the real page count even though only the walked pages are
-    /// materialized. A prefix is by construction un-narrowed (narrowing hydrates first), so the
-    /// filtered set equals the scoped set there.
+    /// materialized. A history-bearing prefix is by construction un-narrowed (narrowing
+    /// hydrates first), so the filtered set equals the scoped set there. The snippets scope is
+    /// the exception: it never hydrates AND can be narrowed over a prefix window, so its
+    /// denominator is always the loaded (filtered) rows — the unfiltered total would page a
+    /// narrowed list into phantom pages (P3 review).
     func effectiveRowCount(loaded: Int) -> Int {
         guard !historyWindowComplete else { return loaded }
         switch scope {
         case .history: return historyWindowTotal
         case .all: return historyWindowTotal + snippetRows.count
-        case .snippets: return snippetRows.count
+        case .snippets: return loaded
         }
     }
 
@@ -349,6 +350,16 @@ final class HistoryPanelModel {
     /// True when a non-All category chip is narrowing the rows (drives the toggle's active tint and
     /// the filtered-empty state).
     var isCategoryFiltering: Bool { category != .all }
+
+    /// A narrowing input is active over HISTORY rows — search, category chip, or the open chips
+    /// row (whose counts need verdicts over everything); the snippets scope narrows only
+    /// snippets, whose rows are always complete. THE one predicate behind "this state needs the
+    /// complete window": the filtered tier hydrates on it, `reconcilePrefix` refuses prefix
+    /// commits under it, and the controller routes reconciles to re-hydration by it — one
+    /// truth, three consumers (P3 review: three hand-written copies drifted immediately).
+    var isNarrowingHistory: Bool {
+        (isSearching || isCategoryFiltering || showsFilterBar) && scope != .snippets
+    }
 
     /// Whether the category chips row is actually on screen: open AND not in the Snippets scope
     /// (snippets carry no content kind). Drives both rendering and the chips' focus-chain slot.

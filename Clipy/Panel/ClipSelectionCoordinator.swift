@@ -95,15 +95,13 @@ extension PanelRow {
     }
 }
 
-/// The subset of settings the panel's paging/numbering needs (read per-open).
+/// The subset of settings the panel's numbering/paging UI needs (read per-open). The
+/// page-query contract itself travels as `HistoryReadService.PageRequest` (see `pageRequest`),
+/// not as loose fields here.
 struct PanelSettings: Equatable, Sendable {
     let itemsPerPage: Int
     let startWithZero: Bool
     let markedWithNumbers: Bool
-    /// M-UI.11 P2 — the page-query contract inputs, snapshotted with the same per-open read so
-    /// sort/limit can't shear against the pages fetched under them.
-    let maxHistorySize: Int
-    let sortAscending: Bool
 }
 
 @MainActor
@@ -128,9 +126,16 @@ final class ClipSelectionCoordinator {
         let settings = model.settings
         return PanelSettings(itemsPerPage: settings.historyPanelItemsPerPage,
                              startWithZero: settings.menuItemsTitleStartWithZero,
-                             markedWithNumbers: settings.menuItemsAreMarkedWithNumbers,
-                             maxHistorySize: settings.maxHistorySize,
-                             sortAscending: !settings.historySortNewestFirst)
+                             markedWithNumbers: settings.menuItemsAreMarkedWithNumbers)
+    }
+
+    /// The open's page-query contract — THE one construction, shared with the head observer
+    /// (both call `PageRequest.current` over the same settings source), so a warm snapshot's
+    /// signature is reproducible by construction rather than by two hand-assembled field lists
+    /// staying in sync (M-UI.11 P3 review: a drifted field would silently turn every open
+    /// cold, with no functional symptom).
+    var pageRequest: HistoryReadService.PageRequest {
+        .current(settings: model.settings)
     }
 
     /// The current history rows (newest- or oldest-first per settings), decrypted + masked under

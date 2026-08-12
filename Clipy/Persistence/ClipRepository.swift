@@ -13,6 +13,7 @@
 //
 
 import Foundation
+import GRDB // explicit product link (M-UI.11 P3): `headState`'s ValueObservation-shaped signature
 import SQLiteData
 
 /// A stable position in the live-history page order — the `(createdAt, id)` VALUES of the last
@@ -21,6 +22,16 @@ import SQLiteData
 struct ClipPageCursor: Sendable, Hashable {
     let createdAt: Date
     let id: UUID
+}
+
+/// One observation-shaped read of the live history's head (M-UI.11 P3): the live-row count plus
+/// the first rows in page order — exactly what the warm cache serves on the next open, so a
+/// `ValueObservation` tracking this value fires on every write that could change what the panel
+/// shows (capture, dedupe move-to-top, paste move-to-top, pin, delete, clear, trim, import,
+/// sync apply, purge) and on nothing else.
+struct HistoryHeadState: Equatable, Sendable {
+    let liveCount: Int
+    let headClips: [Clip]
 }
 
 struct ClipRepository {
@@ -50,25 +61,37 @@ struct ClipRepository {
     /// keyset walk, swapping a paged prefix for the full window (search hydration) would
     /// reshuffle rows the user is looking at.
     func recentClips(limit: Int, ascending: Bool = false) throws -> [Clip] {
-        // SQLite treats `LIMIT -1` as "no limit", so a negative cap would fetch the whole history
-        // (which the menu would then decrypt). Clamp non-negative, mirroring `trim`'s `>= 0` guard.
-        let cap = max(0, limit)
-        return try database.read { db in
-            // `.asc()` / `.desc()` are distinct opaque query types, so they can't share a `?:`.
-            if ascending {
-                return try Clip.where { $0.deletedAt.is(nil) }
-                    .order { ($0.createdAt.asc(), $0.id.asc()) }.limit(cap).fetchAll(db)
-            } else {
-                return try Clip.where { $0.deletedAt.is(nil) }
-                    .order { ($0.createdAt.desc(), $0.id.desc()) }.limit(cap).fetchAll(db)
-            }
+        try database.read { db in
+            try Self.fetchLive(db, after: nil, limit: limit, ascending: ascending)
         }
     }
 
-    /// One keyset page of live clips in the panel's page order — `createdAt`, then `id` as the
-    /// same-second tie-breaker (whole-second stamps collide routinely) — starting AFTER `cursor`
+    /// One keyset page of live clips in the panel's page order, starting AFTER `cursor`
     /// (nil = from the window's head). Fetches at most `limit` rows; callers pass
     /// `pageSize + 1` and treat the extra row as the has-more sentinel.
+    func livePage(after cursor: ClipPageCursor?, limit: Int, ascending: Bool = false) throws -> [Clip] {
+        try database.read { db in
+            try Self.fetchLive(db, after: cursor, limit: limit, ascending: ascending)
+        }
+    }
+
+    /// A keyset page AND the live-row count from ONE read transaction — the open/prefix path
+    /// (M-UI.11 P3 review): with two separate reads, a write landing between them shears the
+    /// committed window total against the served rows (phantom or missing pages until the next
+    /// reconcile re-bases them).
+    func livePageWithCount(after cursor: ClipPageCursor?, limit: Int,
+                           ascending: Bool = false) throws -> (page: [Clip], liveCount: Int) {
+        try database.read { db in
+            (try Self.fetchLive(db, after: cursor, limit: limit, ascending: ascending),
+             try Clip.where { $0.deletedAt.is(nil) }.fetchCount(db))
+        }
+    }
+
+    /// THE ordered live-clips fetch — every reader of the page order (`recentClips`, `livePage`,
+    /// `headState`, the head observation) funnels through this one query body, so the
+    /// `deletedAt IS NULL` filter and the `(createdAt, id)` tie-break can never drift between
+    /// the paged prefix, the full window, and the warm cache (M-UI.11 P3 review: three
+    /// hand-written copies almost immediately diverged).
     ///
     /// The cursor predicate is a SQL row-value comparison via `#sql` — StructuredQueries 0.31.1
     /// has no row-value operator in its builder, and the expanded OR form only bounds the index
@@ -77,45 +100,58 @@ struct ClipRepository {
     /// through the STORED representations — `Date.UnixTimeRepresentation` (INTEGER unix seconds)
     /// and UUID's default lowercase TEXT — because a mismatched bind would silently mis-order
     /// same-second groups (KeysetPaginationPoCTests pins this).
-    func livePage(after cursor: ClipPageCursor?, limit: Int, ascending: Bool = false) throws -> [Clip] {
+    static func fetchLive(_ db: Database, after cursor: ClipPageCursor?, limit: Int,
+                          ascending: Bool) throws -> [Clip] {
+        // SQLite treats `LIMIT -1` as "no limit", so a negative cap would fetch the whole history
+        // (which the caller would then decrypt). Clamp non-negative, mirroring `trim`'s guard.
         let cap = max(0, limit)
-        return try database.read { db in
-            let base = Clip.where { $0.deletedAt.is(nil) }
-            switch (ascending, cursor) {
-            case (false, .none):
-                return try base
-                    .order { ($0.createdAt.desc(), $0.id.desc()) }
-                    .limit(cap)
-                    .fetchAll(db)
-            case (true, .none):
-                return try base
-                    .order { ($0.createdAt.asc(), $0.id.asc()) }
-                    .limit(cap)
-                    .fetchAll(db)
-            case let (false, .some(cursor)):
-                return try base
-                    .where {
-                        #sql("""
-                        (\($0.createdAt), \($0.id)) < \
-                        (\(#bind(cursor.createdAt, as: Date.UnixTimeRepresentation.self)), \(#bind(cursor.id, as: UUID.self)))
-                        """)
-                    }
-                    .order { ($0.createdAt.desc(), $0.id.desc()) }
-                    .limit(cap)
-                    .fetchAll(db)
-            case let (true, .some(cursor)):
-                return try base
-                    .where {
-                        #sql("""
-                        (\($0.createdAt), \($0.id)) > \
-                        (\(#bind(cursor.createdAt, as: Date.UnixTimeRepresentation.self)), \(#bind(cursor.id, as: UUID.self)))
-                        """)
-                    }
-                    .order { ($0.createdAt.asc(), $0.id.asc()) }
-                    .limit(cap)
-                    .fetchAll(db)
-            }
+        let base = Clip.where { $0.deletedAt.is(nil) }
+        // `.asc()` / `.desc()` are distinct opaque query types, so they can't share a `?:`.
+        switch (ascending, cursor) {
+        case (false, .none):
+            return try base
+                .order { ($0.createdAt.desc(), $0.id.desc()) }
+                .limit(cap)
+                .fetchAll(db)
+        case (true, .none):
+            return try base
+                .order { ($0.createdAt.asc(), $0.id.asc()) }
+                .limit(cap)
+                .fetchAll(db)
+        case let (false, .some(cursor)):
+            return try base
+                .where {
+                    #sql("""
+                    (\($0.createdAt), \($0.id)) < \
+                    (\(#bind(cursor.createdAt, as: Date.UnixTimeRepresentation.self)), \(#bind(cursor.id, as: UUID.self)))
+                    """)
+                }
+                .order { ($0.createdAt.desc(), $0.id.desc()) }
+                .limit(cap)
+                .fetchAll(db)
+        case let (true, .some(cursor)):
+            return try base
+                .where {
+                    #sql("""
+                    (\($0.createdAt), \($0.id)) > \
+                    (\(#bind(cursor.createdAt, as: Date.UnixTimeRepresentation.self)), \(#bind(cursor.id, as: UUID.self)))
+                    """)
+                }
+                .order { ($0.createdAt.asc(), $0.id.asc()) }
+                .limit(cap)
+                .fetchAll(db)
         }
+    }
+
+    /// The head read the observation tracks (M-UI.11 P3). Static over a raw `Database` handle —
+    /// not `database.read` — because `ValueObservation.tracking`'s closure receives the reader
+    /// it must fetch on; it funnels through `fetchLive`, so the observation watches exactly
+    /// what `recentClips`/`livePage` serve (same `(createdAt, id)` order contract, same
+    /// tombstone filter).
+    static func headState(_ db: Database, limit: Int, ascending: Bool) throws -> HistoryHeadState {
+        HistoryHeadState(
+            liveCount: try Clip.where { $0.deletedAt.is(nil) }.fetchCount(db),
+            headClips: try fetchLive(db, after: nil, limit: limit, ascending: ascending))
     }
 
     func clip(id: Clip.ID) throws -> Clip? {

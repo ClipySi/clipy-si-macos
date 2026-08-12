@@ -17,6 +17,7 @@
 		1A0000000000000000000072 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = 1A0000000000000000000071 /* Sparkle */; };
 		1A0000000000000000000082 /* ClipySiCore in Frameworks */ = {isa = PBXBuildFile; productRef = 1A0000000000000000000081 /* ClipySiCore */; };
 		1A0000000000000000000092 /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = 1A0000000000000000000091 /* GRDB */; };
+		1A0000000000000000000093 /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = 1A0000000000000000000094 /* GRDB */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -51,6 +52,7 @@
 				1A0000000000000000000062 /* Screeen in Frameworks */,
 				1A0000000000000000000072 /* Sparkle in Frameworks */,
 				1A0000000000000000000082 /* ClipySiCore in Frameworks */,
+				1A0000000000000000000093 /* GRDB in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -104,6 +106,7 @@
 			name = Clipy;
 			packageProductDependencies = (
 				1A0000000000000000000011 /* SQLiteData */,
+				1A0000000000000000000094 /* GRDB */,
 				1A0000000000000000000021 /* Magnet */,
 				1A0000000000000000000024 /* Sauce */,
 				1A0000000000000000000031 /* Sharing */,
@@ -609,6 +612,11 @@
 			productName = ClipySiCore;
 		};
 		1A0000000000000000000091 /* GRDB */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 1A0000000000000000000090 /* XCRemoteSwiftPackageReference "GRDB.swift" */;
+			productName = GRDB;
+		};
+		1A0000000000000000000094 /* GRDB */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = 1A0000000000000000000090 /* XCRemoteSwiftPackageReference "GRDB.swift" */;
 			productName = GRDB;

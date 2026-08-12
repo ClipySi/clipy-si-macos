@@ -33,6 +33,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The non-activating history browser popped by the history hotkey. Replaces the NSMenu
     /// history popup for ⌃⌘V; the status-item menu still lists history.
     var historyPanel: HistoryPanelController? // internal: reached from AppDelegate+StatusItem
+    /// The panel's warm-open store and its resident keeper (M-UI.11 P3): the observer watches
+    /// the history head, keeps the cache display-ready between opens, and pings the panel so an
+    /// open panel reconciles live mutations too.
+    private var historyWarmCache: HistoryWarmCache?
+    private var historyHeadObserver: HistoryHeadObserver?
     // `internal` (not private) so the `AppDelegate+Diagnostics.swift` extension can use them.
     var welcomeWindow: NSWindow?
 
@@ -109,7 +114,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // The history hotkey opens the FloatingPanel. Snapshot the paste target before the
         // panel takes key (same role as the NSMenu's onMenuWillOpen), so a later selection pastes into
         // the app that was frontmost — not into our panel.
-        let panel = HistoryPanelController(blobStore: blobStore)
+        // M-UI.11 P3: the warm cache + head observer share the panel's read service (one actor
+        // serializes all decrypt/mask work), so a hotkey open can serve prewarmed first rows in
+        // the same turn as the shell.
+        let warmCache = HistoryWarmCache()
+        let readService = HistoryReadService()
+        let panel = HistoryPanelController(blobStore: blobStore,
+                                           readService: readService,
+                                           warmCache: warmCache)
         panel.onWillShow = { [weak service] in service?.captureFrontmost() }
         panel.onSelectClip = { [weak service] id in service?.paste(clipID: id) }
         // Snippet picks paste their plaintext content via the same gated path. The masked-
@@ -124,6 +136,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.onOpenHistoryManager = { [weak self] in self?.openHistoryManager() }
         panel.onClearHistory = { [weak controller] in controller?.confirmAndClearHistory() }
         historyPanel = panel
+
+        // Start the resident head observer: its first yield prewarms the cache (§4.4), every
+        // later fire refreshes it and reconciles an OPEN panel, and a screen lock purges +
+        // hides (nothing decrypted survives behind the lock — D4). NOTE: the lock-hide rule
+        // rides on this observer's wiring — any change that disables the warm cache/observer
+        // must keep an equivalent lock subscription for the panel.
+        let observer = HistoryHeadObserver(cache: warmCache, readService: readService)
+        observer.onHeadChanged = { [weak panel] in panel?.reconcileFromObservation() }
+        observer.onScreenLock = { [weak panel] in panel?.purgeForScreenLock() }
+        observer.start()
+        historyWarmCache = warmCache
+        historyHeadObserver = observer
 
         // Prompt for Accessibility once at launch (no-op if already trusted) so the first paste works.
         // On the very first run the Welcome flow owns this ask (its Accessibility step), so we don't

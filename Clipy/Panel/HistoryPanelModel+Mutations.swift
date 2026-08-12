@@ -144,6 +144,58 @@ extension HistoryPanelModel {
         }
     }
 
+    /// Replace the loaded prefix with a fresh read of the same range (M-UI.11 P3): the head
+    /// observation saw a write land under the OPEN panel, and the controller re-read the prefix
+    /// from current data. Deleted rows drop out (nothing stale stays selectable — the P3 exit
+    /// rule), moved/new rows re-slot, and the count re-bases; the user's page, parked page
+    /// move, and selection survive wherever they still resolve. Narrowing commits belong to
+    /// the hydration path (`completeWindow`) — a prefix built without the search/category
+    /// context must never replace a narrowed window, so those states are skipped here (defense
+    /// in depth with the controller's own ordering guards).
+    func reconcilePrefix(_ rows: [PanelRow], totalCount: Int, windowComplete: Bool) {
+        guard !isLoadingFirstRows, !isNarrowingHistory else { return }
+        // A parked page move is the user's live navigation, not stale context: the reconcile
+        // cancelled the fetch that was serving it (and the append that would complete it), so
+        // re-target it against the fresh window — goToPage re-clamps, and re-parks/fetches if
+        // the rows still don't reach it. Dropping it would swallow the keypress (P3 review).
+        let target = pendingPage ?? currentPage
+        // An unchanged prefix needs no commit: the common no-drift verify after a warm open
+        // would otherwise force a full derived-tier rebuild and list diff per open.
+        if rows == historyRows && windowComplete == historyWindowComplete
+            && max(totalCount, rows.count) == historyWindowTotal {
+            if pendingPage != nil {
+                pendingPage = nil
+                goToPage(target)
+            }
+            return
+        }
+        let previousSelection = selection
+        withBatchedInputs {
+            historyRows = rows
+            historyWindowTotal = max(totalCount, rows.count)
+            historyWindowComplete = windowComplete
+        }
+        pendingPage = nil
+        goToPage(target)
+        if let surviving = survivingSelection(previousSelection) {
+            selection = surviving
+        }
+    }
+
+    /// Screen lock (D4): drop every decrypted history row — with masking off they are raw
+    /// plaintext, and `hide()` alone would keep them resident behind the lock. Snippets are
+    /// user-authored plaintext and stay. Not `beginLoading`: there is no open being staged;
+    /// the next `show()` rebuilds whatever it needs.
+    func purgeHistoryRows() {
+        withBatchedInputs {
+            historyRows = []
+            historyWindowTotal = 0
+            historyWindowComplete = true
+        }
+        pendingPage = nil
+        selection = nil
+    }
+
     /// Close the chips row, clearing any active category, in ONE rebuild (the funnel toggle-off /
     /// ⌘F-off path — `isFilterBarOpen = false` followed by `setCategory(.all)` would walk the rows
     /// twice). A closed bar must never keep narrowing the list.

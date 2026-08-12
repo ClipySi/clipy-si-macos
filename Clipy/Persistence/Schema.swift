@@ -66,6 +66,11 @@ struct Clip: Identifiable, Sendable {
     var isSensitive: Bool = false
 }
 
+/// Synthesized member-wise equality, so the head-of-history observation (M-UI.11 P3) can
+/// `removeDuplicates()` — only a commit that actually changes a watched row/count reaches the
+/// warm-cache rebuild.
+extension Clip: Equatable {}
+
 /// A secondary UTType representation of a clip (child of `Clip`). The *primary* representation lives
 /// in `Clip.dataPath` / `Clip.primaryType`; these rows hold every *other* captured representation so
 /// the paste service can restore all UTTypes (not just the primary). `dataPath` is that
