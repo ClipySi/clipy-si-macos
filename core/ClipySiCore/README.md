@@ -24,20 +24,29 @@ This package contains only:
 ## Cutting a release of the core binary
 
 The XCFramework is produced from the core repository (`./build-xcframework.sh`, universal
-arm64 + x86_64). To publish it for a tag `vX.Y.Z`:
+arm64 + x86_64). Publish the asset **before** committing anything that references it, so
+`main` never points at a URL that does not resolve yet:
 
 ```bash
 # 1. Build the universal XCFramework from the core repo, then zip it:
 ditto -c -k --sequesterRsrc --keepParent ClipySiCoreFFI.xcframework ClipySiCoreFFI.xcframework.zip
 
-# 2. Compute the checksum SwiftPM will verify:
+# 2. Compute the checksum SwiftPM will verify (the zip is NOT deterministic — this checksum
+#    matches only this exact zip, so upload the very file you computed it from):
 swift package compute-checksum ClipySiCoreFFI.xcframework.zip
 
-# 3. In this package's Package.swift, set the binaryTarget url to the vX.Y.Z release asset and
-#    paste the checksum from step 2. Commit and tag vX.Y.Z.
+# 3. Create the GitHub Release for the new unique tag and upload
+#    ClipySiCoreFFI.xcframework.zip as an asset. If the tag is not an app release,
+#    pass --latest=false so releases/latest (the Sparkle appcast URL) keeps
+#    pointing at the newest app release.
 
-# 4. Create the GitHub Release for vX.Y.Z and upload ClipySiCoreFFI.xcframework.zip as an asset.
+# 4. In this package's Package.swift, set the binaryTarget url to that release asset and
+#    paste the checksum from step 2. Land this in the SAME commit as any code that needs
+#    the new core API, and push only after step 3 is live.
 ```
 
 After the release exists, a fresh `git clone` of the app builds without any local XCFramework,
-because SwiftPM downloads and checksum-verifies the asset.
+because SwiftPM downloads and checksum-verifies the asset. Verify that path before pushing:
+the local-XCFramework override (resolution rule 1 above) means a machine that built the core
+locally never exercises the url/checksum pin — test the pin from a clean clone (or with the
+local `ClipySiCoreFFI.xcframework` moved away).

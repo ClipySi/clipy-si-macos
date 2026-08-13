@@ -28,6 +28,53 @@ import SQLiteData
 import Testing
 @testable import Clipy
 
+/// One redaction sampling round (M-UI.11 P1-R before/after): the legacy 2-pass shape
+/// (`isSecret` + `mask`, the pre-P1-R MaskingService.live) and the one-pass `evaluate`
+/// (live since P1-R) over the same titles. `onePassFirst` alternates per caller iteration
+/// so systematic order effects (cache/allocator warm-up favoring whichever runs second)
+/// cancel out of the before/after ratio instead of biasing it.
+private struct RedactionStageSample {
+    private(set) var twoPass: Duration = .zero
+    private(set) var onePass: Duration = .zero
+    private(set) var secrets = 0
+    private(set) var onePassSecrets = 0
+    private(set) var displays: [String] = []
+    private(set) var onePassDisplays: [String] = []
+
+    init(titles: [String], config: MaskConfig, onePassFirst: Bool, clock: ContinuousClock) {
+        if onePassFirst {
+            sampleOnePass(titles, config, clock)
+            sampleTwoPass(titles, config, clock)
+        } else {
+            sampleTwoPass(titles, config, clock)
+            sampleOnePass(titles, config, clock)
+        }
+    }
+
+    private mutating func sampleTwoPass(_ titles: [String], _ config: MaskConfig,
+                                        _ clock: ContinuousClock) {
+        displays.reserveCapacity(titles.count)
+        twoPass = clock.measure {
+            for title in titles {
+                if isSecret(text: title, config: config) { secrets += 1 }
+                displays.append(mask(text: title, config: config))
+            }
+        }
+    }
+
+    private mutating func sampleOnePass(_ titles: [String], _ config: MaskConfig,
+                                        _ clock: ContinuousClock) {
+        onePassDisplays.reserveCapacity(titles.count)
+        onePass = clock.measure {
+            for title in titles {
+                let result = evaluate(text: title, config: config)
+                if result.isSecret { onePassSecrets += 1 }
+                onePassDisplays.append(result.display)
+            }
+        }
+    }
+}
+
 @Suite(.serialized) struct HistoryPerformanceBaselineTests {
     static var sizes: [Int] {
         let base = [30, 250, 500, 5_000]
@@ -35,9 +82,11 @@ import Testing
         return wantsXL ? base + [100_000] : base
     }
 
-    /// Mirrors `MaskingService.live`'s per-title work — the SAME 2-pass shape (`isSecret` then
-    /// `mask`, each running the detector when enabled) with mask ON / full style — but reads no
-    /// AppSettings/UserDefaults, so the measured cost is the core's, not settings I/O.
+    /// Mirrors `MaskingService.live`'s per-title work — since P1-R the one-pass `evaluate`
+    /// (verdict + display from a single detector run) with mask ON / full style — but reads no
+    /// AppSettings/UserDefaults, so the measured cost is the core's, not settings I/O. The
+    /// legacy 2-pass shape (`isSecret` then `mask`) is still measured alongside as the
+    /// before/after reference.
     private static func liveShapedConfig() -> MaskConfig {
         var config = defaultConfig()
         config.enabled = true
@@ -58,6 +107,7 @@ import Testing
         // outside the samples (it showed as a 2.5 ms outlier on the very first mask interval).
         _ = isSecret(text: "warm-up probe", config: config)
         _ = mask(text: "warm-up probe", config: config)
+        _ = evaluate(text: "warm-up probe", config: config)
         _ = CodeClassifier.classify("{\"warm\": true, \"up\": 1}")
 
         // Corpus self-validation: the tombstone-exclusion assertions below prove nothing unless
@@ -71,6 +121,7 @@ import Testing
         var fetchSamples: [Duration] = []
         var decryptSamples: [Duration] = []
         var maskSamples: [Duration] = []
+        var maskOnePassSamples: [Duration] = []
         var classifySamples: [Duration] = []
         var pipelineSamples: [Duration] = []
         var secretCount = 0
@@ -81,9 +132,9 @@ import Testing
             $0.historyCipher = PerfFixture.cipher
             $0.maskingService = MaskingService { text in
                 guard !text.isEmpty else { return MaskingResult(isSecret: false, display: text) }
-                let secret = isSecret(text: text, config: config)
-                let display = mask(text: text, config: config)
-                return MaskingResult(isSecret: secret, display: display)
+                // Mirror of MaskingService.live's P1-R one-pass shape (minus settings reads).
+                let result = evaluate(text: text, config: config)
+                return MaskingResult(isSecret: result.isSecret, display: result.display)
             }
         } operation: {
             let repository = ClipRepository()
@@ -108,21 +159,19 @@ import Testing
                     }
                 })
 
-                // Stage 3 — redaction evaluate, 2-pass exactly like MaskingService.live (mask ON).
-                var displays: [String] = []
-                displays.reserveCapacity(titles.count)
-                var secrets = 0
-                maskSamples.append(clock.measure {
-                    for title in titles {
-                        if isSecret(text: title, config: config) { secrets += 1 }
-                        displays.append(mask(text: title, config: config))
-                    }
-                })
+                // Stage 3 / 3b — redaction: the legacy 2-pass shape (pre-P1-R reference) vs
+                // the one-pass `evaluate` the live service runs since P1-R. The helper
+                // alternates which shape samples first each iteration so order effects cancel.
+                let redaction = RedactionStageSample(titles: titles, config: config,
+                                                     onePassFirst: !iteration.isMultiple(of: 2),
+                                                     clock: clock)
+                maskSamples.append(redaction.twoPass)
+                maskOnePassSamples.append(redaction.onePass)
 
                 // Stage 4 — code classification over the display strings (the panel-row pass).
                 var code = 0
                 classifySamples.append(clock.measure {
-                    for display in displays where CodeClassifier.classify(display) != nil {
+                    for display in redaction.displays where CodeClassifier.classify(display) != nil {
                         code += 1
                     }
                 })
@@ -135,7 +184,7 @@ import Testing
                 })
 
                 if iteration == 0 {
-                    secretCount = secrets
+                    secretCount = redaction.secrets
                     codeCount = code
                     // Correctness gates — a fixture or filter regression invalidates every number.
                     // Deliberately count-shaped: a failure message must carry only integers, never
@@ -143,11 +192,19 @@ import Testing
                     // test output on ANY toolchain's #expect rendering).
                     let ghostRows = fetched.count { $0.deletedAt != nil }
                     let undecryptable = built.count { $0.decryptFailed }
+                    // P1-R parity gate, count-shaped like everything here: the one-pass and
+                    // 2-pass stages must agree on every verdict and every display string.
+                    let displayMismatches = zip(redaction.displays, redaction.onePassDisplays)
+                        .count { $0 != $1 }
                     #expect(fetched.count == corpus.liveCount)
                     #expect(ghostRows == 0, "tombstones must not reach the display pipeline")
                     #expect(titles.count == fetched.count)
                     #expect(undecryptable == 0, "every live fixture title must decrypt")
-                    #expect(secrets > 0, "the corpus must exercise the secret detector")
+                    #expect(redaction.secrets > 0, "the corpus must exercise the secret detector")
+                    #expect(redaction.onePassSecrets == redaction.secrets,
+                            "one-pass verdicts must match 2-pass")
+                    #expect(redaction.onePassDisplays.count == redaction.displays.count)
+                    #expect(displayMismatches == 0, "one-pass displays must match 2-pass")
                     #expect(code > 0, "the corpus must exercise the code classifier")
                 }
             }
@@ -157,14 +214,15 @@ import Testing
         report("dbFetch", size: size, rows: corpus.liveCount, fetchSamples)
         report("decrypt", size: size, rows: corpus.liveCount, decryptSamples)
         report("maskEvaluate2pass", size: size, rows: corpus.liveCount, maskSamples, extra: "secrets=\(secretCount)")
+        report("maskEvaluate1pass", size: size, rows: corpus.liveCount, maskOnePassSamples, extra: "secrets=\(secretCount)")
         report("classify", size: size, rows: corpus.liveCount, classifySamples, extra: "code=\(codeCount)")
         report("displayBuild", size: size, rows: corpus.liveCount, pipelineSamples)
     }
 
-    /// The 2-pass evaluate cost per mask style (plan §8.5 wants full/prefix2/suffix4/off covered):
-    /// same 500-row corpus titles, one summary line per style. `off` short-circuits the detector in
-    /// `mask` but not `isSecret`, so it is NOT free — that asymmetry is exactly what P1-R's
-    /// one-pass API targets.
+    /// Redaction cost per mask style (plan §8.5 wants full/prefix2/suffix4/off covered): same
+    /// 500-row corpus titles, one 2-pass line + one 1-pass line per style. `off` short-circuits
+    /// the detector in `mask` but not `isSecret`, so 2-pass `off` is NOT free — that asymmetry
+    /// is what P1-R's one-pass `evaluate` (the `maskStyle1p_*` lines) removed.
     @Test func maskStyleBaseline() throws {
         let corpus = try PerfFixture.makeCorpus(liveCount: 500)
         let clock = ContinuousClock()
@@ -199,17 +257,22 @@ import Testing
             config.style = styleCase.style
             _ = isSecret(text: "warm-up probe", config: config)
             var samples: [Duration] = []
+            var onePassSamples: [Duration] = []
             var secrets = 0
-            for _ in 0..<7 {
-                secrets = 0
-                samples.append(clock.measure {
-                    for title in titles {
-                        if isSecret(text: title, config: config) { secrets += 1 }
-                        _ = mask(text: title, config: config)
-                    }
-                })
+            var onePassSecrets = 0
+            // Alternate the sampling order per rep — same rationale as stageBaseline's 3/3b.
+            for rep in 0..<7 {
+                let sample = RedactionStageSample(titles: titles, config: config,
+                                                  onePassFirst: !rep.isMultiple(of: 2),
+                                                  clock: clock)
+                samples.append(sample.twoPass)
+                onePassSamples.append(sample.onePass)
+                secrets = sample.secrets
+                onePassSecrets = sample.onePassSecrets
             }
+            #expect(onePassSecrets == secrets, "one-pass verdicts must match 2-pass")
             report("maskStyle_\(styleCase.label)", size: 500, rows: titles.count, samples, extra: "secrets=\(secrets)")
+            report("maskStyle1p_\(styleCase.label)", size: 500, rows: titles.count, onePassSamples, extra: "secrets=\(onePassSecrets)")
         }
     }
 
@@ -261,8 +324,9 @@ import Testing
                 $0.historyCipher = PerfFixture.cipher
                 $0.maskingService = MaskingService { text in
                     guard !text.isEmpty else { return MaskingResult(isSecret: false, display: text) }
-                    return MaskingResult(isSecret: isSecret(text: text, config: config),
-                                         display: mask(text: text, config: config))
+                    // Mirror of MaskingService.live's P1-R one-pass shape (minus settings reads).
+                    let result = evaluate(text: text, config: config)
+                    return MaskingResult(isSecret: result.isSecret, display: result.display)
                 }
             } operation: {
                 let service = HistoryReadService()

@@ -20,8 +20,8 @@ let coreBinary: Target = FileManager.default.fileExists(atPath: localXCFramework
     ? .binaryTarget(name: "ClipySiCoreFFI", path: "ClipySiCoreFFI.xcframework")
     : .binaryTarget(
         name: "ClipySiCoreFFI",
-        url: "https://github.com/ClipySi/clipy-si-macos/releases/download/v1.0.0/ClipySiCoreFFI.xcframework.zip",
-        checksum: "1507981b78ca478cc1ed4d8ac8201a2d5a45890629feb866dfe170fc13f716d9"
+        url: "https://github.com/ClipySi/clipy-si-macos/releases/download/core-v0.2.0/ClipySiCoreFFI.xcframework.zip",
+        checksum: "c4e91866716a2641ea0fac0aec71ae07883b46b2c6a4de25bd4d64b80581d272"
     )
 
 let package = Package(

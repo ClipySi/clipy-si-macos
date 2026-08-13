@@ -58,9 +58,10 @@ extension MaskingService {
             config.style = maskStyle(from: policy.maskStyleRaw)
             return { [config] text in
                 guard !text.isEmpty else { return MaskingResult(isSecret: false, display: text) }
-                let secret = isSecret(text: text, config: config)
-                let display = mask(text: text, config: config)
-                return MaskingResult(isSecret: secret, display: display)
+                // One-pass core call (M-UI.11 P1-R): the detector runs once for both the
+                // verdict and the display, where isSecret+mask ran it twice.
+                let result = ClipySiCore.evaluate(text: text, config: config)
+                return MaskingResult(isSecret: result.isSecret, display: result.display)
             }
         }
         return MaskingService(

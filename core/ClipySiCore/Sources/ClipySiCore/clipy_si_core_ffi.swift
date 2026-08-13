@@ -894,6 +894,91 @@ public func FfiConverterTypeMaskConfig_lower(_ value: MaskConfig) -> RustBuffer 
 
 
 /**
+ * One-pass verdict + display. Mirrors `core_lib::MaskEvaluation` (M-UI.11 P1-R).
+ */
+public struct MaskEvaluation {
+    /**
+     * A secret was detected (like `is_secret`, independent of `config.enabled`).
+     */
+    public var isSecret: Bool
+    /**
+     * What to render (identical to `mask` for the same text/config).
+     */
+    public var display: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * A secret was detected (like `is_secret`, independent of `config.enabled`).
+         */isSecret: Bool, 
+        /**
+         * What to render (identical to `mask` for the same text/config).
+         */display: String) {
+        self.isSecret = isSecret
+        self.display = display
+    }
+}
+
+#if compiler(>=6)
+extension MaskEvaluation: Sendable {}
+#endif
+
+
+extension MaskEvaluation: Equatable, Hashable {
+    public static func ==(lhs: MaskEvaluation, rhs: MaskEvaluation) -> Bool {
+        if lhs.isSecret != rhs.isSecret {
+            return false
+        }
+        if lhs.display != rhs.display {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(isSecret)
+        hasher.combine(display)
+    }
+}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMaskEvaluation: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MaskEvaluation {
+        return
+            try MaskEvaluation(
+                isSecret: FfiConverterBool.read(from: &buf), 
+                display: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: MaskEvaluation, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.isSecret, into: &buf)
+        FfiConverterString.write(value.display, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMaskEvaluation_lift(_ buf: RustBuffer) throws -> MaskEvaluation {
+    return try FfiConverterTypeMaskEvaluation.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMaskEvaluation_lower(_ value: MaskEvaluation) -> RustBuffer {
+    return FfiConverterTypeMaskEvaluation.lower(value)
+}
+
+
+/**
  * A full record envelope (header + optional sealed body). `body == None` is a tombstone.
  */
 public struct RecordEnvelopeFfi {
@@ -2213,6 +2298,18 @@ public func encodeEnvelope(envelope: RecordEnvelopeFfi)throws  -> Data  {
 })
 }
 /**
+ * Evaluate `text` once: the detector runs a single time and both `is_secret` and `display`
+ * come from that one result — equivalent to calling `is_secret` then `mask`, at half the cost.
+ */
+public func evaluate(text: String, config: MaskConfig) -> MaskEvaluation  {
+    return try!  FfiConverterTypeMaskEvaluation_lift(try! rustCall() {
+    uniffi_clipy_si_core_ffi_fn_func_evaluate(
+        FfiConverterString.lower(text),
+        FfiConverterTypeMaskConfig_lower(config),$0
+    )
+})
+}
+/**
  * May this tombstone file be removed from the provider? (`last_seen` values are unix SECONDS.)
  */
 public func gcEligible(tombstoneHlc: HlcFfi, devicesLastSeenSecs: [Int64], nowSecs: Int64)throws  -> Bool  {
@@ -2454,6 +2551,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_clipy_si_core_ffi_checksum_func_encode_envelope() != 53837) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_clipy_si_core_ffi_checksum_func_evaluate() != 61827) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_clipy_si_core_ffi_checksum_func_gc_eligible() != 38605) {
