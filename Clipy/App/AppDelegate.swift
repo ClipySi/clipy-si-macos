@@ -38,6 +38,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// open panel reconciles live mutations too.
     private var historyWarmCache: HistoryWarmCache?
     private var historyHeadObserver: HistoryHeadObserver?
+    /// The one decrypt/mask actor every history read shares (panel, warm cache, and — M-UI.11
+    /// P5 — the History Manager; the manager's store lives inside its retained window).
+    private lazy var historyReadService = HistoryReadService()
     // `internal` (not private) so the `AppDelegate+Diagnostics.swift` extension can use them.
     var welcomeWindow: NSWindow?
 
@@ -118,7 +121,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // serializes all decrypt/mask work), so a hotkey open can serve prewarmed first rows in
         // the same turn as the shell.
         let warmCache = HistoryWarmCache()
-        let readService = HistoryReadService()
+        let readService = historyReadService
         let panel = HistoryPanelController(blobStore: blobStore,
                                            readService: readService,
                                            warmCache: warmCache)
@@ -423,7 +426,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         diagnostics.record(.featureUsed(.history))
         activateAsRegular()
         if historyManagerWindow == nil {
+            // The manager reads through the SAME actor as the panel — one executor
+            // serializes every decrypt/mask in the app.
             let view = HistoryManagerView(
+                store: HistoryManagerStore(readService: historyReadService),
                 onCopy: { [weak self] id in self?.pasteService?.copyOnly(clipID: id) },
                 onDelete: { [weak self] id in self?.pasteService?.delete(clipID: id) },
                 onClearAll: { [weak self] in self?.pasteService?.deleteAll() },

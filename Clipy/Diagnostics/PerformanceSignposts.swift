@@ -43,6 +43,11 @@ enum PanelSignpost {
         case searchFilter
         /// One recomputation of `categoryCounts` (a second full-array pass today).
         case categoryCounts
+        /// The History Manager's page/facet SELECT (M-UI.11 P5) — distinct from the panel's
+        /// `historyFetch` so baseline dashboards don't mix the two surfaces' traffic.
+        case managerFetch
+        /// The manager's decrypt+mask pass (page build or one scan batch).
+        case managerDecryptMask
     }
 
     private static let signposter = OSSignposter(
@@ -60,6 +65,8 @@ enum PanelSignpost {
         case .modelCommit: return signposter.beginInterval("PanelModelCommit", id: id)
         case .searchFilter: return signposter.beginInterval("PanelSearchFilter", id: id)
         case .categoryCounts: return signposter.beginInterval("PanelCategoryCounts", id: id)
+        case .managerFetch: return signposter.beginInterval("ManagerDBFetch", id: id)
+        case .managerDecryptMask: return signposter.beginInterval("ManagerDecryptMask", id: id)
         }
     }
 
@@ -76,6 +83,8 @@ enum PanelSignpost {
         case .modelCommit: signposter.endInterval("PanelModelCommit", state, "rows=\(rows, privacy: .public)")
         case .searchFilter: signposter.endInterval("PanelSearchFilter", state, "rows=\(rows, privacy: .public)")
         case .categoryCounts: signposter.endInterval("PanelCategoryCounts", state, "rows=\(rows, privacy: .public)")
+        case .managerFetch: signposter.endInterval("ManagerDBFetch", state, "rows=\(rows, privacy: .public)")
+        case .managerDecryptMask: signposter.endInterval("ManagerDecryptMask", state, "rows=\(rows, privacy: .public)")
         }
     }
 

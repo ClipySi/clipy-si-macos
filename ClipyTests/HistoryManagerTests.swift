@@ -91,18 +91,13 @@ import Testing
         }
     }
 
-    // MARK: - Window query (P0-C hotfix, history-performance plan v2 §6)
+    // MARK: - Tombstone exclusion (the P0-C contract, carried into the P5 read path)
 
-    /// `liveWindow` backs BOTH the initial `@FetchAll` and the explicit `loadWindow()` reload. The
-    /// reload used to rebuild the window WITHOUT the `deletedAt IS NULL` filter, so tombstones
-    /// (content wiped → undecryptable) surfaced as ghost rows after any explicit reload.
-    ///
-    /// Boundary: these tests pin the SHARED QUERY's semantics; that both view paths consume that
-    /// one symbol is a structural fact of HistoryManagerView (the property wrapper and `loadWindow`
-    /// both reference `Self.liveWindow`) which a unit test can't drive — `.task`/`@FetchAll` only
-    /// run inside a rendered view. Re-introducing an inline query there is what code review must
-    /// keep out.
-    @Test func liveWindowExcludesTombstonesOnBothLoadPaths() throws {
+    /// The manager's base request fixes `deletedAt IS NULL` inside `managerBase` — every page,
+    /// count, facet, and scan-walk read goes through it, so the P0-C leak class (an explicit
+    /// load dropping the filter) has no code path left. Soft-deleted rows (content wiped →
+    /// undecryptable) must never surface as ghost rows.
+    @Test func managerPagesExcludeTombstones() throws {
         let database = try TestDatabase.make()
         try withDependencies {
             $0.defaultDatabase = database
@@ -112,47 +107,68 @@ import Testing
             for index in 0..<10 {
                 try repo.add(Make.clip(createdAt: Make.epoch.addingTimeInterval(Double(index))))
             }
-            // Soft-delete the 3 NEWEST rows — if the filter leaked they would sit at the window head.
+            // Soft-delete the 3 NEWEST rows — a leaked filter would rank them at the head.
             for clip in try repo.clips().prefix(3) {
                 try repo.delete(id: clip.id, soft: true)
             }
 
-            let rows = try database.read { db in try HistoryManagerView.liveWindow.fetchAll(db) }
+            let data = try repo.managerPage(filter: .none, sort: .newestFirst, after: nil,
+                                            limit: 100, options: .count)
             // Count-shaped so a failure message carries only integers, never a [Clip] dump (§3.2).
-            let ghostRows = rows.count { $0.deletedAt != nil }
-            #expect(rows.count == 7)
+            let ghostRows = data.page.count { $0.deletedAt != nil }
+            #expect(data.page.count == 7)
+            #expect(data.filteredCount == 7)
             #expect(ghostRows == 0)
         }
     }
 
-    /// Tombstones must not consume window slots either: with exactly `windowLimit` live rows plus
-    /// newer tombstones, the window returns every live row and no truncation sentinel (the +1 row
-    /// that makes `windowTruncated` show its "covers the most recent N" notice).
-    @Test func tombstonesConsumeNoWindowSlotsAndTripNoTruncationSentinel() throws {
+    /// Tombstones must not consume page slots either: with exactly one page of live rows plus
+    /// NEWER tombstones, the page serves every live row and no has-more sentinel survives (a
+    /// leaked filter would rank the tombstones first AND push live rows past the LIMIT).
+    @Test func tombstonesConsumeNoPageSlotsAndTripNoSentinel() throws {
         let database = try TestDatabase.make()
         try withDependencies {
             $0.defaultDatabase = database
         } operation: {
-            let limit = HistoryManagerView.windowLimit
+            let pageSize = 50
             try database.write { db in
-                for index in 0..<limit {
+                for index in 0..<pageSize {
                     let clip = Make.clip(createdAt: Make.epoch.addingTimeInterval(Double(index)))
                     try Clip.insert { clip }.execute(db)
                 }
-                // Newer than every live row: a leaked filter would rank these first AND push
-                // live rows past the LIMIT.
                 for index in 0..<60 {
-                    var dead = Make.clip(createdAt: Make.epoch.addingTimeInterval(Double(limit + index)))
+                    var dead = Make.clip(createdAt: Make.epoch.addingTimeInterval(Double(pageSize + index)))
                     dead.deletedAt = Make.epoch
                     dead.titleCipher = Data()
                     try Clip.insert { dead }.execute(db)
                 }
             }
 
-            let rows = try database.read { db in try HistoryManagerView.liveWindow.fetchAll(db) }
-            let ghostRows = rows.count { $0.deletedAt != nil }
-            #expect(rows.count == limit, "all live rows fit; no sentinel row → no truncation notice")
+            let repo = ClipRepository()
+            let data = try repo.managerPage(filter: .none, sort: .newestFirst, after: nil,
+                                            limit: pageSize + 1, options: [.count, .facets])
+            let ghostRows = data.page.count { $0.deletedAt != nil }
+            #expect(data.page.count == pageSize, "all live rows fit; no sentinel row → no next page")
             #expect(ghostRows == 0)
+            // Facets come from the live set only — the tombstones' type must not add a facet.
+            #expect(data.typeRawValues?.count == 1)
+        }
+    }
+
+    // MARK: - Preview truncation (M-UI.11 P5)
+
+    /// `preview` is display-only and capped; search runs on the FULL `searchableTitle`
+    /// (HistoryManagerScanTests pins the matching side of this contract).
+    @Test func previewIsCappedButSearchableTitleIsNot() throws {
+        try withDependencies {
+            $0.historyCipher = cipher
+        } operation: {
+            let longTitle = String(repeating: "a", count: 900) + " needle"
+            let clip = try sealedClip(title: longTitle)
+            let display = ClipDisplayBuilder().display(of: clip)
+            let row = HistoryClipRow(clip: clip, display: display)
+            #expect(row.preview.count == HistoryClipRow.previewDisplayCap)
+            #expect(HistoryClipRow.searchableTitle(for: display).count == longTitle.count)
         }
     }
 

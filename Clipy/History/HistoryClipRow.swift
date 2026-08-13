@@ -12,6 +12,13 @@ import AppKit
 import Foundation
 
 struct HistoryClipRow: Identifiable, Sendable, Equatable {
+    /// Display cap for `preview` (M-UI.11 P5): the table renders one line and the snippetize
+    /// sheet a short excerpt, but a 10,000-char clip must not keep its whole masked title
+    /// resident per row — the scan can accumulate every match. Search NEVER runs on this
+    /// truncated string: the scan matches on the full `searchableTitle` first (an implicit
+    /// truncated-search contract is a §12 exclusion).
+    static let previewDisplayCap = 300
+
     let id: Clip.ID
     let preview: String
     let createdAt: Date
@@ -20,13 +27,18 @@ struct HistoryClipRow: Identifiable, Sendable, Equatable {
     let pinnedDisplay: String
     let decryptFailed: Bool
     let canSnippetize: Bool
+    /// Raw metadata mirrors of the SQL sort keys (M-UI.11 P5): the scan's sorted merge must
+    /// order by exactly what `ClipRepository.managerFetch` orders by — the raw `primaryType`,
+    /// not the localized label; the pin flag, not its display string.
+    let primaryType: String
+    let isPinned: Bool
 
     /// Copy is suppressed for rows whose payload can't be decrypted (ephemeral-key fallback).
     var canCopy: Bool { !decryptFailed }
 
     init(clip: Clip, display: ClipDisplay) {
         id = clip.id
-        preview = Self.preview(for: display)
+        preview = String(Self.searchableTitle(for: display).prefix(Self.previewDisplayCap))
         createdAt = clip.createdAt
         sourceBundleDisplay = clip.sourceBundle ?? ""
         typeDisplay = Self.typeDisplay(for: clip.primaryType)
@@ -35,9 +47,14 @@ struct HistoryClipRow: Identifiable, Sendable, Equatable {
         // Only plain-text clips can become snippets; "String" is capture's highest-priority type, so a
         // text clip always has `primaryType == string` (SnippetMaker relies on the same fact).
         canSnippetize = !display.decryptFailed && clip.primaryType == NSPasteboard.PasteboardType.string.rawValue
+        primaryType = clip.primaryType
+        isPinned = clip.isPinned
     }
 
-    private static func preview(for display: ClipDisplay) -> String {
+    /// The manager's search haystack AND the (untruncated) source of `preview`: the full masked
+    /// `displayTitle`, or the type placeholder for non-text clips — so a query like "image"
+    /// finds image rows exactly as it did against the 500-row window's in-memory previews.
+    static func searchableTitle(for display: ClipDisplay) -> String {
         if display.decryptFailed {
             return String(localized: "(decryption failed)", comment: "History title when a clipboard item can't be decrypted")
         }
@@ -53,7 +70,9 @@ struct HistoryClipRow: Identifiable, Sendable, Equatable {
         }
     }
 
-    private static func typeDisplay(for type: String) -> String {
+    /// Internal (M-UI.11 P5): the store maps the facet query's raw `primaryType` values to
+    /// these labels for the Type menu — the SAME mapping this row renders with.
+    static func typeDisplay(for type: String) -> String {
         switch type {
         case NSPasteboard.PasteboardType.string.rawValue:
             return String(localized: "Text", comment: "History manager type label for text")

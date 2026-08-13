@@ -2,9 +2,9 @@
 //  PanelSearch.swift
 //  ClipySi — Apple Silicon rewrite
 //
-//  Pure text search for the history FloatingPanel (history-panel design §4.1 / C3). Mirrors the
-//  History Manager's `HistoryFilter` text match — locale-aware `localizedStandardContains`, whitespace-
-//  trimmed, empty query ⇒ all rows — but runs over `PanelRow`. Crucially the haystack is `PanelRow.title`,
+//  Pure text search for the history FloatingPanel (history-panel design §4.1 / C3), and — via
+//  `matchesTitle` — the one predicate the History Manager's scan shares (M-UI.11 P5): locale-aware
+//  `localizedStandardContains`, whitespace-trimmed, empty query ⇒ all rows. Crucially the panel haystack is `PanelRow.title`,
 //  which is the *masked* `displayTitle` (built by `ClipSelectionCoordinator.historyRows()` via
 //  `ClipSelectionCoordinator.displayBody`), so a `maskStyle = .full` secret renders as ●●● and can't match,
 //  and only the disclosed `prefix2`/`suffix4` characters are searchable. The raw decrypted title never
@@ -24,12 +24,18 @@ enum PanelSearch {
         query.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// THE single-row match — over the masked `title` only, locale-aware contains (case-,
-    /// diacritic- and width-insensitive; matches HistoryFilter / Finder). `term` must already
-    /// be normalized. Shared by the in-memory tier below and the progressive scan (M-UI.11
-    /// P4), so a prefix-window search and a complete-window search can never disagree.
+    /// THE single-title match — locale-aware contains (case-, diacritic- and width-insensitive;
+    /// matches Finder). `term` must already be normalized. Every text search in the app funnels
+    /// through this one predicate: the panel's in-memory tier and progressive scan (M-UI.11
+    /// P4) via `matches(_:term:)`, and the History Manager's scan over its searchable titles
+    /// (M-UI.11 P5) — so no two search surfaces can disagree on what "contains" means.
+    static func matchesTitle(_ title: String, term: String) -> Bool {
+        term.isEmpty || title.localizedStandardContains(term)
+    }
+
+    /// The panel's single-row match — the masked `title` only (§9 leakage guarantee).
     static func matches(_ row: PanelRow, term: String) -> Bool {
-        term.isEmpty || row.title.localizedStandardContains(term)
+        matchesTitle(row.title, term: term)
     }
 
     /// The selectable rows matching `query`, in their original order. An empty (or whitespace-only) query

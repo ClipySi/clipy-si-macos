@@ -3,55 +3,23 @@
 //  ClipySi — Apple Silicon rewrite
 //
 //  Read-only clipboard history manager. The window is hosted by AppDelegate in an AppKit
-//  NSWindow; the table itself is SwiftUI. It observes a bounded *recent window* of clips via
-//  @FetchAll (newest `historyWindowLimit`), decrypts them once per identity change, then does
-//  filter/search/sort/paging entirely in memory (`HistoryFilter`). All of that is display-only —
-//  the only mutation here is delete (design, Q1). Text search must be in-memory because the
-//  preview is an AES-GCM ciphertext (`Clip.titleCipher`), not searchable in SQL.
+//  NSWindow; the table itself is SwiftUI over `HistoryManagerStore` (M-UI.11 P5): one 50-row
+//  page of the filtered/sorted live history at a time — no 500-row eager-decrypt window, no
+//  coverage cutoff. Sort and metadata filters push down to SQL; text search runs as a
+//  progressive scan over the whole live set (the preview is an AES-GCM ciphertext, so only
+//  the decrypted-and-masked title is searchable — never in SQL). All of it is display-only —
+//  the only mutation here is delete (design, Q1). The Preview column is no longer sortable:
+//  its ordering would need every row decrypted, which is exactly what P5 retires.
 //
 
 import AppKit
 import SQLiteData
 import SwiftUI
 
-private let historyPageSize = 50
-// Bounded recent window the manager loads + decrypts. Search/filter/sort operate over this window;
-// with the default 30-item history cap virtually all users see their whole history here, and larger
-// histories get an honest "covers the most recent N" notice rather than a silent truncation.
-private let historyWindowLimit = 500
-
 struct HistoryManagerView: View {
-    /// The manager's bounded window: the newest `historyWindowLimit` LIVE clips (+1 sentinel row that
-    /// only signals truncation). The single source of truth for both the initial `@FetchAll` and the
-    /// explicit `loadWindow()` reload — a tombstoned row (`deletedAt` set, `titleCipher` blanked) must
-    /// never surface as a decryption-failed ghost or consume a window slot on either path.
-    static var liveWindow: SelectOf<Clip> {
-        Clip.where { $0.deletedAt.is(nil) }.order { $0.createdAt.desc() }.limit(historyWindowLimit + 1)
-    }
+    @Bindable var store: HistoryManagerStore
 
-    /// The window's row budget (sans the truncation sentinel) — exposed so tests can pin the
-    /// boundary behavior of `liveWindow` without duplicating the constant.
-    static let windowLimit = historyWindowLimit
-
-    @FetchAll(HistoryManagerView.liveWindow) private var clips
-    @State private var page = 0
-    @State private var selection: Clip.ID?
-    @State private var loadError: String?
-
-    // Decrypted window, then the filtered/sorted view of it. `allRows` is rebuilt only when the clip
-    // identity/order changes; `displayedRows` only when `allRows` or the query changes — never per
-    // body render (selection/hover would otherwise re-run the pipeline).
-    @State private var allRows: [HistoryClipRow] = []
-    @State private var displayedRows: [HistoryClipRow] = []
-    @State private var availableTypes: [String] = []
-    @State private var availableApps: [String] = []
-
-    @State private var searchText = ""
-    @State private var typeFilter: String?
-    @State private var appFilter: String?
-    @State private var sortOrder = HistoryQuery.defaultSort
-
-    private let displayBuilder = ClipDisplayBuilder()
+    @State private var sortOrder = [KeyPathComparator(\HistoryClipRow.createdAt, order: .reverse)]
 
     private let onCopy: (Clip.ID) -> Void
     private let onDelete: (Clip.ID) -> Void
@@ -65,13 +33,15 @@ struct HistoryManagerView: View {
     @State private var confirmingClearAll = false
     @State private var snippetizing: SnippetizeTarget?
 
-    init(onCopy: @escaping (Clip.ID) -> Void = { _ in },
+    init(store: HistoryManagerStore,
+         onCopy: @escaping (Clip.ID) -> Void = { _ in },
          onDelete: @escaping (Clip.ID) -> Void = { _ in },
          onClearAll: @escaping () -> Void = {},
          onSnippetize: @escaping (Clip.ID, SnippetFolder.ID) -> Void = { _, _ in },
          onBuildExport: @escaping () -> HistoryExportResult? = { nil },
          onImport: @escaping (Data) -> HistoryImportOutcome = { _ in .failure(message: "") },
          onResolveImportOverflow: @escaping (HistoryImportOverflowResolution) -> Void = { _ in }) {
+        self.store = store
         self.onCopy = onCopy
         self.onDelete = onDelete
         self.onClearAll = onClearAll
@@ -81,53 +51,32 @@ struct HistoryManagerView: View {
         self.onResolveImportOverflow = onResolveImportOverflow
     }
 
-    private var query: HistoryQuery {
-        HistoryQuery(searchText: searchText, typeDisplay: typeFilter, appDisplay: appFilter, sort: sortOrder)
-    }
-
-    private var selectedRow: HistoryClipRow? {
-        guard let selection else { return nil }
-        return allRows.first { $0.id == selection }
-    }
-
-    // The window is full → older clips exist beyond it and are not covered by search/filter.
-    private var windowTruncated: Bool { clips.count > historyWindowLimit }
-
-    private var pageRows: [HistoryClipRow] {
-        let start = min(page * historyPageSize, displayedRows.count)
-        let end = min(start + historyPageSize, displayedRows.count)
-        return Array(displayedRows[start..<end])
-    }
-
-    private var canGoPrevious: Bool { page > 0 }
-    private var canGoNext: Bool { (page + 1) * historyPageSize < displayedRows.count }
-
     var body: some View {
         VStack(spacing: 0) {
             header
             Divider()
-            HistoryFilterBar(searchText: $searchText,
-                             typeFilter: $typeFilter,
-                             appFilter: $appFilter,
-                             availableTypes: availableTypes,
-                             availableApps: availableApps,
-                             showClear: query.isActive,
-                             onClear: clearFilters)
-            if windowTruncated { truncationNotice }
+            HistoryFilterBar(searchText: $store.searchText,
+                             typeFilter: $store.typeFilter,
+                             appFilter: $store.appFilter,
+                             availableTypes: store.availableTypes,
+                             availableApps: store.availableApps,
+                             showClear: store.isFilterActive,
+                             onClear: { store.clearFilters() })
             Divider()
             table
             Divider()
             footer
         }
         .frame(minWidth: 820, minHeight: 460)
-        .task { await loadWindow() }
-        .onChange(of: clips.map(\.id), initial: true) { rebuildRows() }
-        .onChange(of: query) { page = 0; applyQuery() }
+        .task { await store.run() }
+        .onChange(of: sortOrder) { store.apply(tableSort: sortOrder) }
         .modifier(HistoryDialogs(pendingDelete: $pendingDelete,
                                  confirmingClearAll: $confirmingClearAll,
-                                 selection: $selection,
-                                 onDelete: onDelete,
-                                 onClearAll: onClearAll))
+                                 selection: $store.selection,
+                                 // Optimistic prune: a delete issued HERE disappears immediately;
+                                 // the write's reconcile converges counts/cursors afterwards.
+                                 onDelete: { [store] id in store.pruneRow(id); onDelete(id) },
+                                 onClearAll: { [store] in store.pruneAllRows(); onClearAll() }))
         .sheet(item: $snippetizing) { target in
             SnippetizeSheet(
                 clipPreview: target.preview,
@@ -138,19 +87,13 @@ struct HistoryManagerView: View {
     }
 
     private func snippetizeSelection() {
-        guard let row = selectedRow, row.canSnippetize else { return }
+        guard let row = store.selectedRow, row.canSnippetize else { return }
         snippetizing = SnippetizeTarget(id: row.id, preview: row.preview)
     }
 
     private func copySelection() {
-        guard let row = selectedRow, row.canCopy else { return }
+        guard let row = store.selectedRow, row.canCopy else { return }
         onCopy(row.id)
-    }
-
-    private func clearFilters() {
-        searchText = ""
-        typeFilter = nil
-        appFilter = nil
     }
 
     private var header: some View {
@@ -161,46 +104,37 @@ struct HistoryManagerView: View {
             Button { copySelection() } label: {
                 Label("Copy", systemImage: "doc.on.doc")
             }
-            .disabled(selectedRow?.canCopy != true)
+            .disabled(store.selectedRow?.canCopy != true)
             .help("Copy the selected item to the clipboard")
 
             Button { snippetizeSelection() } label: {
                 Label("Snippetize", systemImage: "text.badge.plus")
             }
-            .disabled(selectedRow?.canSnippetize != true)
+            .disabled(store.selectedRow?.canSnippetize != true)
             .help("Save the selected text item as a snippet")
 
-            Button { if let selection { pendingDelete = selection } } label: {
+            Button { if let selection = store.selection { pendingDelete = selection } } label: {
                 Label("Delete", systemImage: "trash")
             }
-            .disabled(selection == nil)
+            // selectedRow (not bare selection): a selection whose row left the visible page
+            // must not leave Delete armed against an invisible/gone row (review).
+            .disabled(store.selectedRow == nil)
             .help("Delete the selected item")
 
             Button(role: .destructive) { confirmingClearAll = true } label: {
                 Label("Clear All", systemImage: "trash.slash")
             }
-            .disabled(allRows.isEmpty)
+            .disabled(store.historyIsEmpty)
             .help("Delete all clipboard history")
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
     }
 
-    private var truncationNotice: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "info.circle")
-            Text("Search and filters cover the most recent \(historyWindowLimit) items")
-            Spacer()
-        }
-        .font(.caption)
-        .foregroundStyle(.secondary)
-        .padding(.horizontal, 14)
-        .padding(.bottom, 6)
-    }
-
     private var table: some View {
-        Table(pageRows, selection: $selection, sortOrder: $sortOrder) {
-            TableColumn("Preview", value: \.preview, comparator: .localizedStandard) { row in
+        Table(store.displayedRows, selection: $store.selection, sortOrder: $sortOrder) {
+            // Not sortable: ordering by preview would require decrypting the whole history.
+            TableColumn("Preview") { row in
                 Text(row.preview)
                     .lineLimit(1)
                     .foregroundStyle(row.decryptFailed ? .secondary : .primary)
@@ -213,37 +147,47 @@ struct HistoryManagerView: View {
             }
             .width(min: 150, ideal: 170)
 
-            TableColumn("App", value: \.sourceBundleDisplay, comparator: .localizedStandard) { row in
+            TableColumn("App", value: \.sourceBundleDisplay) { row in
                 Text(row.sourceBundleDisplay)
                     .lineLimit(1)
                     .foregroundStyle(row.sourceBundleDisplay.isEmpty ? .tertiary : .secondary)
             }
             .width(min: 140, ideal: 180)
 
-            TableColumn("Type", value: \.typeDisplay, comparator: .localizedStandard) { row in
+            TableColumn("Type", value: \.typeDisplay) { row in
                 Text(row.typeDisplay)
                     .lineLimit(1)
                     .foregroundStyle(.secondary)
             }
             .width(min: 90, ideal: 120)
 
-            TableColumn("Pinned", value: \.pinnedDisplay, comparator: .localizedStandard) { row in
+            TableColumn("Pinned", value: \.pinnedDisplay) { row in
                 Text(row.pinnedDisplay)
                     .foregroundStyle(.secondary)
             }
             .width(min: 70, ideal: 80)
         }
-        .overlay {
-            if let loadError {
+        .overlay { tableOverlay }
+    }
+
+    @ViewBuilder private var tableOverlay: some View {
+        // Order matters: the error plate never covers live rows; before the first commit a
+        // spinner shows (a reopen must not flash "No History"/"No Results" while loading).
+        if store.displayedRows.isEmpty {
+            if store.loadFailed {
                 ContentUnavailableView(
                     "History Unavailable",
                     systemImage: "exclamationmark.triangle",
-                    description: Text(loadError)
+                    description: Text("The history database could not be read.")
                 )
-            } else if allRows.isEmpty {
-                ContentUnavailableView("No History", systemImage: "clipboard")
-            } else if displayedRows.isEmpty {
+            } else if !store.hasLoaded || store.isScanning {
+                ProgressView()
+            } else if store.isFilterActive {
                 ContentUnavailableView.search
+            } else if store.historyIsEmpty {
+                ContentUnavailableView("No History", systemImage: "clipboard")
+            } else {
+                ProgressView() // transitional: rows exist but none committed yet
             }
         }
     }
@@ -251,75 +195,68 @@ struct HistoryManagerView: View {
     private var footer: some View {
         HStack(spacing: 8) {
             Button {
-                if canGoPrevious { selection = nil; page -= 1 }
+                store.goToPreviousPage()
             } label: {
                 Image(systemName: "chevron.left").frame(width: 18, height: 18)
             }
             .help("Previous Page")
-            .disabled(!canGoPrevious)
+            .disabled(!store.canGoPrevious)
 
-            Text("Page \(page + 1)")
+            // While scanning, no settled page count exists to promise (§3.1) — the label
+            // drops the "of N" and the items count yields to the live tally in the indicator.
+            Text(store.isScanning
+                ? "Page \(store.pageIndex + 1)"
+                : "Page \(store.pageIndex + 1) of \(store.lastPageIndex + 1)")
                 .font(.callout)
                 .foregroundStyle(.secondary)
-                .frame(minWidth: 72)
+                .frame(minWidth: 90)
 
             Button {
-                if canGoNext { selection = nil; page += 1 }
+                store.goToNextPage()
             } label: {
                 Image(systemName: "chevron.right").frame(width: 18, height: 18)
             }
             .help("Next Page")
-            .disabled(!canGoNext)
+            .disabled(!store.canGoNext)
+
+            if store.isScanning {
+                scanIndicator
+            }
 
             Spacer()
 
-            HistoryTransferControls(historyIsEmpty: allRows.isEmpty,
+            HistoryTransferControls(historyIsEmpty: store.historyIsEmpty,
                                     onBuildExport: onBuildExport,
                                     onImport: onImport,
                                     onResolveOverflow: onResolveImportOverflow)
 
-            Text("\(displayedRows.count) items")
-                .font(.callout)
-                .foregroundStyle(.secondary)
+            if !store.isScanning {
+                Text("\(store.displayedTotal) items")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
         }
         .buttonStyle(.borderless)
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
     }
 
-    /// Decrypts the loaded window into rows and refreshes the derived filter option lists. Reconciles
-    /// the active Type/App filters against what's still present, then re-applies the query. The mask
-    /// policy is resolved ONCE for the whole window (M-UI.11 P1), not once per row.
-    private func rebuildRows() {
-        let window = Array(clips.prefix(historyWindowLimit))
-        let displays = displayBuilder.displays(of: window, policy: .current())
-        allRows = zip(window, displays).map { clip, display in
-            HistoryClipRow(clip: clip, display: display)
+    /// Search progress: determinate once the scan knows its denominator, a compact spinner
+    /// before that (the first batch carries the total). The tally is explicitly "so far" —
+    /// a partial count must not pose as exact (§3.1).
+    @ViewBuilder private var scanIndicator: some View {
+        if store.scanTotal > 0 {
+            ProgressView(value: Double(min(store.scanProcessed, store.scanTotal)),
+                         total: Double(store.scanTotal))
+                .progressViewStyle(.linear)
+                .frame(width: 120)
+        } else {
+            ProgressView()
+                .controlSize(.small)
         }
-        availableTypes = Set(allRows.map(\.typeDisplay)).sorted()
-        availableApps = Set(allRows.map(\.sourceBundleDisplay).filter { !$0.isEmpty }).sorted()
-        if let type = typeFilter, !availableTypes.contains(type) { typeFilter = nil }
-        if let app = appFilter, !availableApps.contains(app) { appFilter = nil }
-        applyQuery()
-    }
-
-    /// Re-derives the displayed rows from `allRows` + the current query and clamps the page.
-    private func applyQuery() {
-        displayedRows = HistoryFilter.apply(query, to: allRows)
-        let lastPage = displayedRows.isEmpty ? 0 : (displayedRows.count - 1) / historyPageSize
-        if page > lastPage { page = lastPage }
-    }
-
-    private func loadWindow() async {
-        loadError = nil
-        do {
-            try await $clips
-                .load(Self.liveWindow)
-                .task
-        } catch is CancellationError {
-        } catch {
-            loadError = error.localizedDescription
-        }
+        Text("\(store.scanMatches.count) found so far")
+            .font(.callout)
+            .foregroundStyle(.secondary)
     }
 }
 

@@ -298,6 +298,58 @@ import Testing
         }
     }
 
+    /// M-UI.11 P5: the History Manager's read shapes — the date-sort first page (indexed
+    /// keyset), a metadata-sort first page (UNINDEXED — full sort per fetch; the §7 manager
+    /// first-page target rides on this), and the facet/count aggregate that reconciles run.
+    /// Reported, never asserted (like every stage here) — thresholds live in the plan's §7.
+    @Test func managerReadBaseline() async throws {
+        let clock = ContinuousClock()
+        for size in Self.sizes {
+            let corpus = try PerfFixture.makeCorpus(liveCount: size)
+            try await withDependencies {
+                $0.defaultDatabase = corpus.database
+                $0.historyCipher = PerfFixture.cipher
+                $0.maskingService = .identity
+            } operation: {
+                let service = HistoryReadService()
+                let policy = DisplayPolicy(maskEnabled: false, maskStyleRaw: "full",
+                                           classifierAlgorithmVersion: CodeClassifier.algorithmVersion)
+                func request(_ sort: ManagerSort, pageSize: Int = 50) -> HistoryReadService.ManagerRequest {
+                    HistoryReadService.ManagerRequest(pageSize: pageSize, filter: .none,
+                                                      sort: sort, policy: policy)
+                }
+                var dateSamples: [Duration] = []
+                var rows = 0
+                for _ in 0..<7 {
+                    var result: HistoryReadService.ManagerPageResult?
+                    dateSamples.append(await clock.measure {
+                        result = await service.managerPage(after: nil, options: [.count, .facets],
+                                                           request(.newestFirst))
+                    })
+                    rows = result?.rows.count ?? 0
+                }
+                #expect(rows == min(size, 50))
+                var appSamples: [Duration] = []
+                for _ in 0..<7 {
+                    appSamples.append(await clock.measure {
+                        _ = await service.managerPage(after: nil, options: [.count],
+                                                      request(ManagerSort(key: .app, ascending: true)))
+                    })
+                }
+                var facetSamples: [Duration] = []
+                for _ in 0..<7 {
+                    facetSamples.append(await clock.measure {
+                        _ = await service.managerPage(after: nil, options: [.count, .facets],
+                                                      request(.newestFirst, pageSize: 0))
+                    })
+                }
+                report("managerFirstPageDate", size: size, rows: rows, dateSamples)
+                report("managerFirstPageAppSort", size: size, rows: rows, appSamples)
+                report("managerFacetCount", size: size, rows: 0, facetSamples)
+            }
+        }
+    }
+
     /// One summary line per stage: counts and milliseconds only (§3.2 non-leak contract).
     /// p50/min/max — with ≤7 samples a p95 would just be the max wearing a lab coat.
     private func report(_ stage: String, size: Int, rows: Int, _ samples: [Duration], extra: String = "") {

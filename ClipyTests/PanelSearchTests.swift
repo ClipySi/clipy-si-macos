@@ -19,7 +19,7 @@ import Testing
     private func header(_ title: String) -> PanelRow { .folderHeader(UUID(), title: title) }
     private func snippet(_ title: String) -> PanelRow { .snippet(UUID(), title: title) }
 
-    // MARK: - Basic matching (mirrors HistoryFilter semantics)
+    // MARK: - Basic matching (the one `matchesTitle` predicate every search surface shares)
 
     @Test func emptyQueryReturnsEveryRowUnchanged() {
         let rows = [row("alpha"), row("beta"), row("gamma")]

@@ -3,8 +3,8 @@
 //  ClipySi — Apple Silicon rewrite
 //
 //  The History Manager's filter/search row: a text search field plus Type and App dropdowns. Purely
-//  a control surface — it mutates bound query state only; `HistoryFilter` does the actual (display-only)
-//  filtering. The Type/App option lists are derived from the loaded window by the parent view.
+//  a control surface — it mutates bound query state only; `HistoryManagerStore` turns it into SQL
+//  narrowing or a progressive search (M-UI.11 P5). The Type/App option lists come from the store's facets.
 //
 
 import SwiftUI

@@ -35,7 +35,9 @@ struct HistoryHeadState: Equatable, Sendable {
 }
 
 struct ClipRepository {
-    @Dependency(\.defaultDatabase) private var database
+    // Internal (not private) ONLY for the manager extension split (ClipRepository+Manager.swift)
+    // — treat as private to these two files.
+    @Dependency(\.defaultDatabase) var database
     @Dependency(\.date) private var date
 
     // MARK: - Reads
