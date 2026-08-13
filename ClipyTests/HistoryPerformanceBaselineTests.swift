@@ -414,20 +414,71 @@ private struct RedactionStageSample {
         }
     }
 
-    /// One summary line per stage: counts and milliseconds only (§3.2 non-leak contract).
-    /// p50/min/max — with ≤7 samples a p95 would just be the max wearing a lab coat.
-    private func report(_ stage: String, size: Int, rows: Int, _ samples: [Duration], extra: String = "") {
-        let sorted = samples.map(milliseconds(of:)).sorted()
-        guard !sorted.isEmpty else { return }
-        let line = String(
-            format: "perf-baseline size=%d stage=%@ rows=%d iters=%d p50_ms=%.2f min_ms=%.2f max_ms=%.2f %@",
-            size, stage, rows, sorted.count, sorted[sorted.count / 2], sorted[0], sorted[sorted.count - 1], extra)
-        print(line.trimmingCharacters(in: .whitespaces))
+}
+
+/// M-UI.11 P6 — trim's capture-adjacent cost. EVERY stored capture calls
+/// `trim(maxHistorySize:)`, and before P6 it materialized every live non-pinned row (full
+/// records, title ciphertext included) just to conclude nothing was stale. The measured shape
+/// is the at-cap no-op: production steady state is really cap+1 → 1 stale (capture INSERTs,
+/// then trims), but the OFFSET walk dominates both identically (sqlite3-checked: one stale at
+/// `OFFSET n-1` ≈ none at `OFFSET n`) and the no-op leaves the corpus intact across
+/// iterations. Two caveats travel with the numbers (recorded in the baseline doc): the
+/// in-memory fixture prices the walk's CPU only — on disk the per-row `isPinned` probe adds
+/// pager reads the suite cannot see — and the P6 before/after compares two SEPARATE runs,
+/// unlike the in-run A/B stages above. Stale-path semantics are pinned functionally in
+/// ClipRepositoryTests/ClipSoftDeleteTests. Its own suite so a Release `-only-testing:` run
+/// stays cheap — authoritative numbers come from that solo run ONLY: sibling suites are NOT
+/// mutually serialized (`.serialized` scopes to one suite), so a full run measures this suite
+/// against its neighbors.
+@Suite(.serialized) struct HistoryTrimBaselineTests {
+    static var sizes: [Int] {
+        let base = [500, 5_000]
+        let wantsXL = ProcessInfo.processInfo.environment["CLIPY_PERF_XL"] == "1"
+        return wantsXL ? base + [100_000] : base
     }
 
-    private func milliseconds(of duration: Duration) -> Double {
-        Double(duration.components.seconds) * 1_000 + Double(duration.components.attoseconds) / 1e15
+    @Test(arguments: sizes)
+    func trimNoOpBaseline(size: Int) throws {
+        let corpus = try PerfFixture.makeCorpus(liveCount: size)
+        let clock = ContinuousClock()
+        var samples: [Duration] = []
+        var staleTotal = 0
+        try withDependencies {
+            $0.defaultDatabase = corpus.database
+        } operation: {
+            let repository = ClipRepository()
+            // Untimed warm-up (file protocol, same as stageBaseline): statement generation +
+            // first prepare + first-touch of the index pages land outside the samples.
+            _ = try repository.trim(maxHistorySize: size)
+            for _ in 0..<(size >= 100_000 ? 3 : 7) {
+                var stale: [String] = []
+                samples.append(try clock.measure {
+                    stale = try repository.trim(maxHistorySize: size)
+                })
+                staleTotal += stale.count
+            }
+        }
+        // Count-shaped (§3.2): the corpus is all non-pinned live rows, so at cap nothing is
+        // stale — a non-zero count means the trim boundary or its filters regressed.
+        #expect(staleTotal == 0)
+        report("trimNoOp", size: size, rows: corpus.liveCount, samples)
     }
+}
+
+/// One summary line per stage: counts and milliseconds only (§3.2 non-leak contract).
+/// p50/min/max — with ≤7 samples a p95 would just be the max wearing a lab coat.
+/// File-private free function so every perf suite in this file reports in the same shape.
+private func report(_ stage: String, size: Int, rows: Int, _ samples: [Duration], extra: String = "") {
+    let sorted = samples.map(milliseconds(of:)).sorted()
+    guard !sorted.isEmpty else { return }
+    let line = String(
+        format: "perf-baseline size=%d stage=%@ rows=%d iters=%d p50_ms=%.2f min_ms=%.2f max_ms=%.2f %@",
+        size, stage, rows, sorted.count, sorted[sorted.count / 2], sorted[0], sorted[sorted.count - 1], extra)
+    print(line.trimmingCharacters(in: .whitespaces))
+}
+
+private func milliseconds(of duration: Duration) -> Double {
+    Double(duration.components.seconds) * 1_000 + Double(duration.components.attoseconds) / 1e15
 }
 
 private typealias Corpus = PerfFixture.Corpus

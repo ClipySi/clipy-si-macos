@@ -115,6 +115,54 @@ import Testing
         }
     }
 
+    /// P6 evidence: trim's stale query (the only OFFSET query in the app) walks the partial
+    /// live index in index order — no sort step, no table scan — so the bounded shape that
+    /// replaced the fetch-everything trim can't silently regress to materializing the history.
+    @Test func trimStaleQueryUsesThePartialIndexAfterV4() throws {
+        try withDependencies {
+            $0.defaultDatabase = try TestDatabase.make()
+        } operation: {
+            @Dependency(\.defaultDatabase) var database
+            try database.write { db in
+                for index in 0..<8 {
+                    var clip = Make.clip(title: "row \(index)", contentHash: "p6-\(index)",
+                                         createdAt: Make.epoch.addingTimeInterval(TimeInterval(index / 4)))
+                    if index % 4 == 3 { clip.deletedAt = Make.epoch }
+                    try Clip.insert { clip }.execute(db)
+                }
+            }
+            let repository = ClipRepository()
+            let captured = CapturedSQL()
+            try database.write { db in
+                db.trace(options: .statement) { event in
+                    if case let .statement(statement) = event {
+                        // `sql`, not `expandedSQL`: LIMIT/OFFSET are bound (`?`), and a bound
+                        // LIMIT is opaque to the planner where a literal `-1` is not — EXPLAIN
+                        // must see the form SQLite actually prepared, or the pin proves the
+                        // wrong statement. (Also keeps the OFFSET filter data-independent.)
+                        captured.append(statement.sql)
+                    }
+                }
+            }
+            _ = try repository.trim(maxHistorySize: 2) // 6 live → 4 stale (exercises the query)
+            try database.write { db in db.trace(options: .statement, nil) }
+
+            let staleSelects = captured.statements.filter { $0.hasPrefix("SELECT") && $0.contains("OFFSET") }
+            #expect(staleSelects.count == 1)
+            let staleSQL = try #require(staleSelects.first)
+            let plan = try database.read { db in
+                // Re-bind the values trim bound (LIMIT -1 OFFSET 2) so the plan is taken under
+                // the executed statement's exact conditions.
+                try Row.fetchAll(db, sql: "EXPLAIN QUERY PLAN \(staleSQL)", arguments: [-1, 2])
+                    .compactMap { $0["detail"] as String? }
+                    .joined(separator: " | ")
+            }
+            print("p6-eqp detail=\(plan)")
+            #expect(plan.contains("clips_live_createdAt_id"))
+            #expect(!plan.contains("TEMP B-TREE"), "the stale walk must ride the index order, not sort")
+        }
+    }
+
     /// Trace sink — the trace callback is `@Sendable`, so the captured statements live in a
     /// reference box (appends happen serially on the test's single DB connection).
     private final class CapturedSQL: @unchecked Sendable {

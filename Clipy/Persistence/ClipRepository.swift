@@ -395,28 +395,42 @@ struct ClipRepository {
     }
 
     /// Enforces the history cap. Keeps the newest `maxHistorySize` non-pinned clips (by
-    /// `createdAt`) and deletes the rest; pinned clips are always kept and do not count toward
+    /// `(createdAt, id)` — the same total order the panel pages by, so same-second ties break
+    /// identically) and deletes the rest; pinned clips are always kept and do not count toward
     /// the limit (pinning is new — the original had no pins). Returns the deleted clips'
     /// `dataPath`s so the caller can delete their blobs (no orphaned ciphertext). Unlike the
     /// original, which trims only on a timer and on clear-all, the capture layer decides when to
     /// call this.
     @discardableResult
     func trim(maxHistorySize: Int) throws -> [String] {
+        // Load-bearing since the OFFSET rewrite: SQLite clamps a negative OFFSET to 0, which
+        // would flip "invalid cap → no-op" into "invalid cap → evict everything".
         guard maxHistorySize >= 0 else { return [] }
         return try database.write { db in
             // Live rows only: trim is LOCAL eviction (no tombstone — design §5.5; syncApplied
             // prevents re-import), and tombstoned rows are the engine's to purge, not trim's.
-            let newestFirst = try Clip
+            //
+            // Stale query (M-UI.11 P6): EVERY stored capture runs this, and the previous shape
+            // materialized all live non-pinned rows (title ciphertext included) just to
+            // `dropFirst` the kept prefix. OFFSET the kept rows away inside SQLite instead and
+            // decode only the two columns the eviction needs. Not O(1): the walk still visits
+            // maxHistorySize index entries, each probing the row for `isPinned` — but no Clip
+            // values are built and no title ciphertext is read. `LIMIT -1` is SQLite's
+            // documented "no upper bound", leaving OFFSET to apply alone; the result (and the
+            // `IN` lists below — one bind per stale id) is sized to the EVICTION set, which the
+            // settings clamp keeps ≤100k, well under Apple's system-SQLite 500k variable limit.
+            let stale = try Clip
                 .where { !$0.isPinned }
                 .where { $0.deletedAt.is(nil) }
-                .order { $0.createdAt.desc() }
+                .order { ($0.createdAt.desc(), $0.id.desc()) }
+                .limit(-1, offset: maxHistorySize)
+                .select { ($0.id, $0.dataPath) }
                 .fetchAll(db)
-            let stale = Array(newestFirst.dropFirst(maxHistorySize))
             guard !stale.isEmpty else { return [] }
-            let staleIDs = stale.map(\.id)
+            let staleIDs = stale.map(\.0)
             let repPaths = try ClipRepresentation.where { $0.clipID.in(staleIDs) }.select(\.dataPath).fetchAll(db)
             try Clip.delete().where { $0.id.in(staleIDs) }.execute(db)
-            return stale.map(\.dataPath) + repPaths
+            return stale.map(\.1) + repPaths
         }
     }
 }

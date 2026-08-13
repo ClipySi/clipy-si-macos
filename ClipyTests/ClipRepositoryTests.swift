@@ -124,6 +124,79 @@ import Testing
         }
     }
 
+    @Test func trimReturnsPrimaryAndRepresentationBlobPathsForGC() throws {
+        let db = try TestDatabase.make()
+        try withDependencies {
+            $0.defaultDatabase = db
+        } operation: {
+            let repo = ClipRepository()
+            let kept = Make.clip(title: "kept", createdAt: Make.epoch.addingTimeInterval(10))
+            let stale = Make.clip(title: "stale", createdAt: Make.epoch)
+            try repo.add(kept)
+            try repo.add(stale)
+            try db.write { database in
+                try ClipRepresentation.insert {
+                    ClipRepresentation(clipID: stale.id, uttype: "public.rtf",
+                                       dataPath: "/tmp/stale-rep.data", byteSize: 3)
+                    ClipRepresentation(clipID: kept.id, uttype: "public.rtf",
+                                       dataPath: "/tmp/kept-rep.data", byteSize: 3)
+                }.execute(database)
+            }
+
+            // The evicted clip's primary AND representation blobs come back for GC (no orphaned
+            // ciphertext); the kept clip's representation row must survive the cascade.
+            #expect(Set(try repo.trim(maxHistorySize: 1)) == [stale.dataPath, "/tmp/stale-rep.data"])
+            let repPaths = try db.read { try ClipRepresentation.select(\.dataPath).fetchAll($0) }
+            #expect(repPaths == ["/tmp/kept-rep.data"])
+            // Trim is LOCAL eviction, never a sync delete (design §5.5): an evicting trim must
+            // hard-delete, not mint tombstones — a tombstone here would be DISTRIBUTED, deleting
+            // the clip from every other device. Every other read above hides tombstones, so
+            // without this line a soft-delete regression would pass this whole suite.
+            #expect(try repo.tombstones().isEmpty)
+        }
+    }
+
+    @Test func trimBreaksSameSecondTiesLikeThePanelPageOrder() throws {
+        try withDependencies {
+            $0.defaultDatabase = try TestDatabase.make()
+        } operation: {
+            let repo = ClipRepository()
+            // Three clips in the SAME createdAt second: the boundary must be decided by the
+            // panel's `(createdAt, id)` page order, not by scan order. The survivors are
+            // compared against the page head SERVED before trimming — if `fetchLive`'s
+            // tie-break ever changes, trim must follow it, so this can't silently decouple.
+            let clips = (0..<3).map { index in Make.clip(title: "t\(index)", createdAt: Make.epoch) }
+            for clip in clips { try repo.add(clip) }
+            let pageHead = try repo.recentClips(limit: 2).map(\.id)
+            // Concrete direction pin: UUIDs bind as lowercase TEXT and id DESC means "newer",
+            // so the smallest uuidString is the boundary victim.
+            let oldest = try #require(clips.min { $0.id.uuidString.lowercased() < $1.id.uuidString.lowercased() })
+
+            #expect(try repo.trim(maxHistorySize: 2).count == 1)
+            #expect(Set(try repo.clips().map(\.id)) == Set(pageHead))
+            #expect(try repo.clip(id: oldest.id) == nil)
+        }
+    }
+
+    @Test func trimZeroCapEvictsAllNonPinnedAndNegativeCapIsANoOp() throws {
+        try withDependencies {
+            $0.defaultDatabase = try TestDatabase.make()
+        } operation: {
+            let repo = ClipRepository()
+            try repo.add(Make.clip(title: "a"))
+            try repo.add(Make.clip(title: "b"))
+            try repo.add(Make.clip(title: "pin", isPinned: true))
+
+            // Invalid (negative) cap stays a no-op — with the OFFSET query a leak here would
+            // evict the whole history, so this pins the guard, not just an edge case.
+            #expect(try repo.trim(maxHistorySize: -1).isEmpty)
+            #expect(try repo.count() == 3)
+
+            #expect(try repo.trim(maxHistorySize: 0).count == 2)
+            #expect(try repo.clips().compactMap(\.testTitle) == ["pin"])
+        }
+    }
+
     @Test func deleteCascadesToRepresentations() throws {
         let db = try TestDatabase.make()
         try withDependencies {
