@@ -16,6 +16,10 @@ Clipy プロジェクトとは無関係であり、公認されたものでは�
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Status](https://img.shields.io/badge/status-released-green)
 
+<p align="center">
+  <img src="docs/images/history-panel.png" alt="検索・画像プレビュー付きの ClipySi 履歴パネル" width="760">
+</p>
+
 ## ダウンロード
 
 [ClipySi 1.0.0 は GitHub Releases からダウンロードできます。](https://github.com/ClipySi/clipy-si-macos/releases/latest)

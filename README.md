@@ -16,6 +16,10 @@ The app is named **ClipySi** so it does not reuse the `Clipy` / `ClipMenu` produ
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Status](https://img.shields.io/badge/status-released-green)
 
+<p align="center">
+  <img src="docs/images/history-panel.png" alt="The ClipySi history panel showing searchable clips with an image preview" width="760">
+</p>
+
 ## Download
 
 [The latest ClipySi release is available from GitHub Releases.](https://github.com/ClipySi/clipy-si-macos/releases/latest)
