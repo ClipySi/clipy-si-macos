@@ -9,6 +9,14 @@
 //  display string; a masked-secret row is all bullets, classifies as plain text, and never reaches
 //  the provider, so this view can't surface a secret.
 //
+//  Big text/code bodies render in TWO PHASES (M-UI.12): a cheap `placeholderLimit` prefix paints
+//  on the selection-change frame, and the full capped body — split/highlighted off the MainActor
+//  in `PanelPreviewBody.prepare` — swaps in a beat later. The prepare is debounced ~120ms behind
+//  a cancellable sleep, so held-arrow traversal neither lays out nor tokenizes a clip it passed
+//  over. At most `PanelPreviewBody.renderLimit` characters ever reach a `Text` — the URL host
+//  line included (the "(preview truncated)" note marks the cut); the paste path always delivers
+//  the full payload.
+//
 
 import SwiftUI
 
@@ -17,26 +25,61 @@ struct PanelPreviewRichBody: View {
     /// Lazily-resolved payload (image thumbnail / file size) for the row, when applicable.
     let content: PanelPreviewContentProvider.Content?
 
-    /// Highlighted code keyed by the row it was tokenized FROM, computed off the render path
-    /// (`.task(id:)`) so a big clip never stalls the panel; plain monospaced text shows until it
-    /// lands. The id key is the render-time guard: @State survives row changes AND `codeBody`
-    /// remounts (code→text→code), where a value without the key could paint the previous row's
-    /// body for the first frame (review).
-    @State private var highlighted: HighlightedCode?
+    /// The async-prepared body (capped text split / highlighted code) keyed by the INPUTS it was
+    /// built FROM, computed off the render path (`.task(id:)`). The key is the render-time
+    /// guard: @State survives row changes AND body remounts (code→text→code), where a value
+    /// without the key could paint the previous row's body for the first frame (review).
+    @State private var prepared: PreparedBody?
 
-    private struct HighlightedCode: Equatable {
+    private struct PreparedBody: Equatable {
+        let key: PreparationKey
+        let payload: PanelPreviewBody.Payload
+    }
+
+    /// Everything the prepared payload is a function of — NOT just `row.id`: an open-panel
+    /// reconcile can keep the same selected id while its title changes, and the model's lazy
+    /// classification upgrades a same-id row text→code in place (no remount now that the task
+    /// lives on the container). Keying on the title itself subsumes any `updatedAt` revision
+    /// check: a revision that changes what this view renders necessarily changes one of these
+    /// three fields, and one that doesn't needs no re-prepare (review).
+    private struct PreparationKey: Equatable {
         let rowID: RowID
-        let text: AttributedString
+        let title: String
+        let kind: PanelRow.ContentKind
+        let language: String?
+    }
+
+    private var preparationKey: PreparationKey {
+        PreparationKey(rowID: row.id, title: row.title, kind: effectiveKind, language: row.codeLanguage)
     }
 
     var body: some View {
-        switch effectiveKind {
-        case .code: codeBody
-        case .url: urlBody
-        case .image: imageBody
-        case .color: colorBody
-        case .pdf, .file: fileBody
-        case .text: textBody
+        Group {
+            switch effectiveKind {
+            case .code: codeBody
+            case .url: urlBody
+            case .image: imageBody
+            case .color: colorBody
+            case .pdf, .file: fileBody
+            case .text: textBody
+            }
+        }
+        .task(id: preparationKey) {
+            let key = preparationKey
+            guard PanelPreviewBody.needsPreparation(kind: key.kind, title: key.title) else { return }
+            // The cancellation point (review): the detached prepare below runs to completion once
+            // spawned, so absorb selection churn HERE — a passed-over row's task dies inside this
+            // sleep and never launches a tokenization. Only a row the user rests on pays one.
+            try? await Task.sleep(nanoseconds: PanelPreviewBody.debounceNanoseconds)
+            guard !Task.isCancelled else { return }
+            // Detached: splitting/tokenizing is pure CPU work; keep it off the MainActor render path.
+            let payload = await Task.detached(priority: .userInitiated) {
+                PanelPreviewBody.prepare(kind: key.kind, title: key.title, languageLabel: key.language)
+            }.value
+            // A detached task doesn't inherit cancellation: when the selection has already moved
+            // on (.task(id:) restarted), drop this result instead of stamping it onto the new row.
+            guard !Task.isCancelled, let payload else { return }
+            prepared = PreparedBody(key: key, payload: payload)
         }
     }
 
@@ -46,22 +89,50 @@ struct PanelPreviewRichBody: View {
         return .text
     }
 
+    /// The prepared payload, ONLY when it was built from exactly this row's current inputs — a
+    /// stale value (different row, or a same-id row whose title/kind/language moved on) falls
+    /// back to the placeholder instead of painting outdated content.
+    private var preparedPayload: PanelPreviewBody.Payload? {
+        prepared?.key == preparationKey ? prepared?.payload : nil
+    }
+
+    /// Marks the body cap on an over-limit clip. Present from the placeholder frame on (the flag
+    /// is limit-independent), so it never flickers when the prepared body lands.
+    private var truncationNote: some View {
+        Text("(preview truncated)",
+             comment: "Note under the preview body when a long clip is cut at the preview limit")
+            .font(.caption)
+            .foregroundStyle(.tertiary)
+            .padding(.top, 2)
+    }
+
     // MARK: - Text (and snippets): readable typography, first line emphasized
 
     private var textBody: some View {
-        let lines = row.title.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
+        // Short bodies: the placeholder-limit split IS the final content, rendered synchronously
+        // (no swap, no flicker). Long bodies: this placeholder paints instantly; the prepared
+        // full capped split replaces it when the task lands.
+        let text: PanelPreviewBody.TextContent
+        if case .text(let ready) = preparedPayload {
+            text = ready
+        } else {
+            text = PanelPreviewBody.textContent(row.title, limit: PanelPreviewBody.placeholderLimit)
+        }
         return ScrollView {
             // Reading sizes for the wide side pane (420pt): 15pt semibold first line over a 13pt
             // body — the old 12/11pt callout/subheadline pair was tuned for the short bottom strip.
             VStack(alignment: .leading, spacing: 4) {
-                Text(lines.first.map(String.init) ?? " ")
+                Text(text.firstLine)
                     .font(.title3.weight(.semibold))
                     .foregroundStyle(.primary)
-                if lines.count > 1 {
-                    Text(String(lines[1]))
+                if let rest = text.rest {
+                    Text(rest)
                         .font(.body)
                         .lineSpacing(2)
                         .foregroundStyle(.secondary)
+                }
+                if PanelPreviewBody.isTruncated(row.title) {
+                    truncationNote
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -72,45 +143,48 @@ struct PanelPreviewRichBody: View {
     // MARK: - Code: highlighted block, line-preserving monospace
 
     private var codeBody: some View {
-        ScrollView {
-            // Render the stored highlight ONLY when it was tokenized from THIS row — a stale value
-            // (different row) falls back to plain text instead of painting the wrong clip's body.
-            Text(highlighted?.rowID == row.id ? highlighted!.text : AttributedString(row.title))
-                .font(.system(.body, design: .monospaced))
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .textSelection(.disabled)
+        let text: AttributedString
+        if case .code(let ready) = preparedPayload {
+            text = ready
+        } else {
+            // Plain capped prefix until the highlight lands — the pre-M-UI.12 fallback built an
+            // AttributedString of the FULL title here, which was the big-code-clip stall.
+            text = AttributedString(String(row.title.prefix(PanelPreviewBody.placeholderLimit)))
         }
-        .task(id: row.id) {
-            let source = row.title
-            guard let language = CodeClassifier.Language(rawValue: row.codeLanguage ?? "") else { return }
-            // Detached: tokenizing is pure CPU work; keep it off the MainActor render path.
-            let result = await Task.detached(priority: .userInitiated) {
-                CodeHighlighter.highlight(source, language: language)
-            }.value
-            // A detached task doesn't inherit cancellation: when the selection has already moved
-            // on (.task(id:) restarted), drop this result instead of stamping it onto the new row.
-            guard !Task.isCancelled else { return }
-            highlighted = HighlightedCode(rowID: row.id, text: result)
+        return ScrollView {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(text)
+                    .font(.system(.body, design: .monospaced))
+                    .textSelection(.disabled)
+                if PanelPreviewBody.isTruncated(row.title) {
+                    truncationNote
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
     // MARK: - URL: host emphasized, full URL below (never fetched)
 
     private var urlBody: some View {
-        let trimmed = row.title.trimmingCharacters(in: .whitespacesAndNewlines)
-        let host = URL(string: trimmed)?.host()
+        // Same render cap as text/code, applied to BOTH lines — `URL.host()` echoes a multi-KB
+        // host verbatim, so the emphasized line needs the cap as much as the full URL below it.
+        let url = PanelPreviewBody.urlContent(row.title)
         return ScrollView {
             VStack(alignment: .leading, spacing: 3) {
-                if let host {
+                if let host = url.host {
                     Text(host)
                         .font(.title3.weight(.semibold))
                         .foregroundStyle(.primary)
                 }
-                Text(trimmed)
+                Text(url.urlText)
                     .font(.body)
                     .lineSpacing(2)
                     .foregroundStyle(.secondary)
                     .textSelection(.disabled)
+                if url.isTruncated {
+                    truncationNote
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }

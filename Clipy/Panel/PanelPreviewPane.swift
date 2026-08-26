@@ -132,11 +132,20 @@ struct PanelPreviewPane: View {
         return Self.relativeFormatter.localizedString(for: date, relativeTo: Date())
     }
 
+    /// Resolved names by bundle id (nil = unresolvable, cached too), for the process lifetime —
+    /// the LaunchServices lookup + resourceValues hit disk, and `metadata` re-renders on every
+    /// selection change, so an uncached miss taxed each arrow-key step.
+    @MainActor private static var appNameCache: [String: String?] = [:]
+
     /// Resolve a source bundle id to its localized app name, or nil when absent/unresolvable.
     private func appName(_ bundleID: String?) -> String? {
-        guard let bundleID, !bundleID.isEmpty,
-              let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else { return nil }
-        return (try? url.resourceValues(forKeys: [.localizedNameKey]).localizedName)
-            ?? url.deletingPathExtension().lastPathComponent
+        guard let bundleID, !bundleID.isEmpty else { return nil }
+        if let cached = Self.appNameCache[bundleID] { return cached }
+        let name = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID).map { url in
+            (try? url.resourceValues(forKeys: [.localizedNameKey]).localizedName)
+                ?? url.deletingPathExtension().lastPathComponent
+        }
+        Self.appNameCache[bundleID] = name
+        return name
     }
 }
