@@ -18,7 +18,13 @@ The app is named **ClipySi** so it does not reuse the `Clipy` / `ClipMenu` produ
 
 ## Download
 
-[ClipySi 1.0.0 is available from GitHub Releases.](https://github.com/ClipySi/clipy-si-macos/releases/latest)
+[The latest ClipySi release is available from GitHub Releases.](https://github.com/ClipySi/clipy-si-macos/releases/latest)
+
+You can also install it with [Homebrew](https://brew.sh):
+
+```bash
+brew install --cask ClipySi/tap/clipysi
+```
 
 The distribution build is Developer ID signed and notarized.
 It is a universal build for both Apple Silicon and Intel Macs, and runs on macOS 14 Sonoma or later.
