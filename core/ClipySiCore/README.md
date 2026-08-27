@@ -4,7 +4,8 @@ Swift bindings for the shared Rust core (`clipy-si-core`) — secret detection/m
 cryptography, and the record/vault/sync formats. The macOS app links this as a Swift
 package; the heavy lifting lives in a prebuilt, statically-linked `ClipySiCoreFFI.xcframework`.
 
-The Rust implementation is developed in a separate repository and is not included here.
+The Rust implementation is open source at
+[ClipySi/clipy-si-core](https://github.com/ClipySi/clipy-si-core).
 This package contains only:
 
 - `Sources/ClipySiCore/clipy_si_core_ffi.swift` — the committed, generated UniFFI Swift glue.
@@ -17,33 +18,28 @@ This package contains only:
 1. **Local XCFramework (development).** If `ClipySiCoreFFI.xcframework` is present next to
    `Package.swift` (git-ignored), it is used directly. This lets you build the app from a
    locally built core without a published release.
-2. **GitHub Release asset (default).** Otherwise the framework is downloaded from this
-   repository's GitHub Release via `binaryTarget(url:checksum:)`, with the SHA-256 pinned in
-   `Package.swift`. This is what CI and external contributors use.
+2. **GitHub Release asset (default).** Otherwise the framework is downloaded from the
+   core repository's GitHub Release via `binaryTarget(url:checksum:)`, with the SwiftPM
+   checksum pinned in `Package.swift`. This is what CI and external contributors use.
+   Each core release carries a build-provenance attestation; the release notes include
+   the exact `gh attestation verify` invocation to check the asset yourself.
 
 ## Cutting a release of the core binary
 
-The XCFramework is produced from the core repository (`./build-xcframework.sh`, universal
-arm64 + x86_64). Publish the asset **before** committing anything that references it, so
-`main` never points at a URL that does not resolve yet:
+Releases are produced by the core repository's tag-driven CI — no manual builds or
+uploads. In `ClipySi/clipy-si-core`:
 
-```bash
-# 1. Build the universal XCFramework from the core repo, then zip it:
-ditto -c -k --sequesterRsrc --keepParent ClipySiCoreFFI.xcframework ClipySiCoreFFI.xcframework.zip
-
-# 2. Compute the checksum SwiftPM will verify (the zip is NOT deterministic — this checksum
-#    matches only this exact zip, so upload the very file you computed it from):
-swift package compute-checksum ClipySiCoreFFI.xcframework.zip
-
-# 3. Create the GitHub Release for the new unique tag and upload
-#    ClipySiCoreFFI.xcframework.zip as an asset. If the tag is not an app release,
-#    pass --latest=false so releases/latest (the Sparkle appcast URL) keeps
-#    pointing at the newest app release.
-
-# 4. In this package's Package.swift, set the binaryTarget url to that release asset and
-#    paste the checksum from step 2. Land this in the SAME commit as any code that needs
-#    the new core API, and push only after step 3 is live.
-```
+1. Bump `[workspace.package] version` in `Cargo.toml` (update `Cargo.lock` with
+   `cargo update --workspace --offline`) and land it on `main`.
+2. Push the matching `v*` tag. CI verifies (fmt / clippy / tests / cargo-deny), builds
+   the universal XCFramework, runs the Swift KAT conformance tests, attests build
+   provenance, and creates a **draft** release with the SwiftPM checksum in the notes.
+3. Verify the draft asset (`gh attestation verify …` — the exact command is in the
+   release notes), then publish it. Releases are immutable once published: a broken
+   release means a new version, never a re-upload.
+4. In this package's `Package.swift`, point the `binaryTarget` url at the new release
+   asset and paste the checksum from the release notes. Land this in the SAME commit as
+   any code that needs the new core API, and push only after the release is public.
 
 After the release exists, a fresh `git clone` of the app builds without any local XCFramework,
 because SwiftPM downloads and checksum-verifies the asset. Verify that path before pushing:

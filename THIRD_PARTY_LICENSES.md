@@ -82,7 +82,9 @@ transitive dependencies):
 > `uniffi_bindgen`) are not shipped in the released binary.
 
 For the authoritative, fully enumerated list (including every transitive crate and
-exact versions), regenerate from `Cargo.lock` as noted at the top of this file.
+exact versions), see the core repository's
+[`Cargo.lock`](https://github.com/ClipySi/clipy-si-core/blob/main/Cargo.lock) (the core
+is open source), or regenerate as noted at the top of this file.
 
 ---
 

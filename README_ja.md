@@ -78,7 +78,7 @@ ClipySi はこの性質を前提に、保存前、保存時、表示時のそれ
 - 貼り付けには macOS の Accessibility 権限が必要です。
 - Input Monitoring は要求しません。
 
-共有 Rust コア `clipy-si-core` は別リポジトリで管理され、この公開リポジトリには実装を含みません。
+共有 Rust コアは [ClipySi/clipy-si-core](https://github.com/ClipySi/clipy-si-core) としてオープンソースで公開されています。
 リリースアプリにはビルド済みのバイナリ（静的リンク）として組み込まれます。
 機密マスキング、暗号、record/vault 形式、同期判定はそのコアで実装されています。
 
@@ -95,8 +95,9 @@ ClipySi はこの性質を前提に、保存前、保存時、表示時のそれ
 
 通常の利用には、署名・公証済みのリリースビルドを使ってください。
 
-アプリは共有 Rust コア（`ClipySiCore`）を、リリースに同梱されるビルド済みのバイナリ（静的リンク）
-として利用します。Xcode が Swift パッケージ依存として解決するため、アプリのビルドにコアのソースは
+アプリは共有 Rust コア（`ClipySiCore`）を、[ClipySi/clipy-si-core](https://github.com/ClipySi/clipy-si-core)
+の release CI が発行するビルド済みバイナリ（静的リンク・ビルド来歴 attestation 付き）として利用します。
+Xcode が Swift パッケージ依存として解決するため、アプリのビルドにコアのソースは
 必要ありません。コアは別リポジトリで開発されており、コア自体を変更する場合のみ必要になります。
 
 リポジトリを clone します。

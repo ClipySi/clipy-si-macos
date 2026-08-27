@@ -5,7 +5,8 @@ import Foundation
 // ClipySiCore — Swift bindings for the shared Rust core (`clipy-si-core`).
 //
 // The compiled core ships as a prebuilt `ClipySiCoreFFI.xcframework`. Released, CI, and public
-// builds download it from this repository's GitHub Release asset (`binaryTarget(url:checksum:)`).
+// builds download it from the open-source core repository's GitHub Release asset
+// (https://github.com/ClipySi/clipy-si-core, `binaryTarget(url:checksum:)`).
 // `Sources/ClipySiCore/clipy_si_core_ffi.swift` is the committed, generated UniFFI glue that the
 // app compiles against.
 //
@@ -20,8 +21,10 @@ let coreBinary: Target = FileManager.default.fileExists(atPath: localXCFramework
     ? .binaryTarget(name: "ClipySiCoreFFI", path: "ClipySiCoreFFI.xcframework")
     : .binaryTarget(
         name: "ClipySiCoreFFI",
-        url: "https://github.com/ClipySi/clipy-si-macos/releases/download/core-v0.2.0/ClipySiCoreFFI.xcframework.zip",
-        checksum: "c4e91866716a2641ea0fac0aec71ae07883b46b2c6a4de25bd4d64b80581d272"
+        // The core is open source: https://github.com/ClipySi/clipy-si-core
+        // Assets are built, attested, and published by that repository's tag-driven CI.
+        url: "https://github.com/ClipySi/clipy-si-core/releases/download/v0.3.0/ClipySiCoreFFI.xcframework.zip",
+        checksum: "CHECKSUM-FILLED-AT-P4-8" // replaced with the real value once the v0.3.0 release is verified
     )
 
 let package = Package(
