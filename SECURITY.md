@@ -32,8 +32,10 @@ Security-sensitive areas of ClipySi include:
 - **Persistence** — at-rest encryption, Keychain key handling, on-disk footprint.
 - **Paste** — `CGEvent` keystroke injection and frontmost-app handling.
 - **Update** — the Sparkle (EdDSA) auto-update path and appcast feed.
-- **Crypto core** — the shared Rust core (`clipy-si-core`) for detection/masking
-  and (later) record/vault formats and sync.
+- **Crypto core** — the shared Rust core ([ClipySi/clipy-si-core](https://github.com/ClipySi/clipy-si-core))
+  for detection/masking, at-rest crypto primitives, KDF, record/vault formats, and sync
+  decisions. Core-specific issues can also be reported privately on that repository;
+  either channel is fine — we coordinate fixes across both.
 
 Out of scope: vulnerabilities in third-party dependencies should be reported to
 their respective projects (we will still help coordinate where we can).

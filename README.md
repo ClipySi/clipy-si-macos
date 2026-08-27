@@ -84,8 +84,8 @@ ClipySi treats that as a security-sensitive design constraint and protects conte
 - Paste requires the macOS Accessibility permission.
 - Input Monitoring is not requested.
 
-The shared Rust core `clipy-si-core` is maintained in a separate repository and is not included in this public repository.
-The released app links it as a prebuilt, statically-linked binary.
+The shared Rust core is open source at [ClipySi/clipy-si-core](https://github.com/ClipySi/clipy-si-core).
+The released app links it as a prebuilt, statically-linked binary whose build provenance is attested by that repository's CI.
 Secret masking, cryptography, record/vault formats, and sync decisions are implemented in that core.
 
 For details, see the [Privacy Policy](docs/PRIVACY.md), [Distribution Matrix](docs/DISTRIBUTION.md), and [Security Policy](SECURITY.md).
@@ -102,9 +102,10 @@ Implementation security requirements are documented in [security-guidance.md](se
 For normal use, install the signed and notarized release build from GitHub Releases.
 
 The app links the shared Rust core (`ClipySiCore`) as a prebuilt, statically-linked
-binary distributed with releases. Xcode resolves it as a Swift package dependency, so
-building the app does **not** require the core's source. The core is developed in a
-separate repository; you only need it if you are changing the core itself.
+binary published by [ClipySi/clipy-si-core](https://github.com/ClipySi/clipy-si-core)'s
+release CI. Xcode resolves it as a Swift package dependency, so building the app does
+**not** require the core's source. To work on the core itself, clone that repository and
+build with `./build-xcframework.sh` (the local XCFramework is picked up automatically).
 
 Clone and open the project.
 
@@ -194,7 +195,8 @@ ClipySi does not use Realm, RxSwift, PINCache, XIB, `NSCoding`, or LoginServiceK
 
 Issues and pull requests are welcome.
 
-The app links a prebuilt ClipySiCore binary, so building it does not require the core's source.
+The app links a prebuilt ClipySiCore binary, so building it does not require the core's source
+(which is open source at [ClipySi/clipy-si-core](https://github.com/ClipySi/clipy-si-core)).
 Public CI runs SwiftLint and the redaction/logging gate; the full macOS build and test suite runs in the maintainer environment.
 
 Before opening a PR, run `swiftlint lint --quiet` and the test suite if possible.
