@@ -24,7 +24,7 @@ let coreBinary: Target = FileManager.default.fileExists(atPath: localXCFramework
         // The core is open source: https://github.com/ClipySi/clipy-si-core
         // Assets are built, attested, and published by that repository's tag-driven CI.
         url: "https://github.com/ClipySi/clipy-si-core/releases/download/v0.3.0/ClipySiCoreFFI.xcframework.zip",
-        checksum: "CHECKSUM-FILLED-AT-P4-8" // replaced with the real value once the v0.3.0 release is verified
+        checksum: "3a7a91ef969e1a5c5462f81ae7d565890568fe98465d5c9b32fffb3c79912010"
     )
 
 let package = Package(
