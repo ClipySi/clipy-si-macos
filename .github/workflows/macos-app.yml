@@ -53,13 +53,18 @@ jobs:
 
   build-test:
     name: lint · build · test (macOS)
-    runs-on: macos-15
+    # macos-26: the repo requires Xcode 26.5+ (README "Requirements", DESIGN.md §10). The macos-15
+    # image tops out at Xcode 26.3, whose swift-frontend (Swift 6.2.4) crashes type-checking
+    # ClipyTests/KeysetPaginationPoCTests.swift, so it cannot build this project.
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v5
 
       - name: Select the newest installed Xcode
+        # Skip beta/preview installs (e.g. an Xcode 27 preview) so a pre-release toolchain never
+        # becomes the build compiler by accident.
         run: |
-          latest="$(ls -d /Applications/Xcode*.app | sort -V | tail -1)"
+          latest="$(ls -d /Applications/Xcode*.app | grep -vi beta | sort -V | tail -1)"
           echo "Using $latest"
           sudo xcode-select -s "$latest/Contents/Developer"
           xcodebuild -version
